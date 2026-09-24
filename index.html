@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Smart QR – QR codes that match your link</title>
+  <meta name="description" content="Paste a link and get a QR code styled to match it. Works with Facebook, Instagram, YouTube, TikTok, WhatsApp, LinkedIn and any website. Free, private, runs in your browser.">
+  <meta name="theme-color" content="#f3f4f8">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <header class="topbar">
+    <a class="brand" href="./" aria-label="Smart QR home">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+        <rect width="32" height="32" rx="9" fill="currentColor"/>
+        <path fill="#fff" fill-rule="evenodd" d="M6 6h8v8H6zM8.2 8.2v3.6h3.6V8.2zM18 6h8v8h-8zM20.2 8.2v3.6h3.6V8.2zM6 18h8v8H6zM8.2 20.2v3.6h3.6v-3.6zM18 18h3v3h-3zM23 18h3v3h-3zM18 23h3v3h-3zM23 23h3v3h-3z"/>
+      </svg>
+      <span>Smart QR</span>
+    </a>
+    <span class="topbar-note">Free, private, no sign-up</span>
+  </header>
+
+  <main class="wrap">
+
+    <!-- ============ HERO ============ -->
+    <section class="hero" aria-labelledby="title">
+      <h1 id="title">Smart QR</h1>
+      <p class="lead">Create QR codes that match your link.</p>
+
+      <form id="urlForm" class="url-form" novalidate>
+        <label class="sr-only" for="urlInput">Your URL</label>
+        <input id="urlInput" type="text" inputmode="url" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
+               placeholder="Paste your URL here, e.g. instagram.com/yourname">
+        <button type="submit" class="btn btn-primary">Generate QR</button>
+      </form>
+      <p id="urlError" class="form-error" role="alert" hidden></p>
+
+      <p class="privacy">Your QR code and uploaded logo are processed locally in your browser.</p>
+    </section>
+
+    <!-- ============ STUDIO ============ -->
+    <section id="studio" class="studio" hidden aria-label="QR designer">
+
+      <!-- Preview -->
+      <div class="stage">
+        <p class="detected">
+          <span>Detected:</span>
+          <strong id="detectedName">Generic website</strong>
+          <span id="detectedHost" class="host"></span>
+        </p>
+
+        <div class="preview-frame">
+          <div id="preview" aria-live="polite"></div>
+          <p id="renderError" class="render-error" role="alert" hidden></p>
+        </div>
+
+        <p id="scanStatus" class="scan-status" hidden></p>
+        <ul id="tips" class="tips"></ul>
+
+        <div class="actions">
+          <button type="button" id="downloadPng" class="btn btn-light">Download PNG</button>
+          <button type="button" id="downloadSvg" class="btn btn-outline">Download SVG</button>
+          <button type="button" id="resetBtn" class="btn btn-quiet">Reset</button>
+        </div>
+      </div>
+
+      <!-- Controls -->
+      <div class="controls">
+
+        <div class="group">
+          <h2>Theme</h2>
+          <label class="field">
+            <span class="label">Style inspired by</span>
+            <select id="themeSelect">
+              <option value="generic">Generic website</option>
+              <option value="facebook">Facebook</option>
+              <option value="instagram">Instagram</option>
+              <option value="youtube">YouTube</option>
+              <option value="tiktok">TikTok</option>
+              <option value="whatsapp">WhatsApp</option>
+              <option value="linkedin">LinkedIn</option>
+            </select>
+          </label>
+          <p class="hint">Platform-inspired colours only. No official logos or artwork are used.</p>
+        </div>
+
+        <div class="group">
+          <h2>Style</h2>
+          <div class="chips" role="group" aria-label="QR style">
+            <button type="button" class="chip" data-style="classic" aria-pressed="false">Classic</button>
+            <button type="button" class="chip" data-style="rounded" aria-pressed="false">Rounded</button>
+            <button type="button" class="chip" data-style="gradient" aria-pressed="false">Gradient</button>
+            <button type="button" class="chip" data-style="neon" aria-pressed="false">Neon</button>
+            <button type="button" class="chip" data-style="glass" aria-pressed="false">Glass</button>
+            <button type="button" class="chip" data-style="organic" aria-pressed="false">Organic</button>
+          </div>
+
+          <p class="label spaced">Corner style</p>
+          <div class="chips chips-4" role="group" aria-label="Corner style">
+            <button type="button" class="chip" data-eye="square" aria-pressed="false">Square</button>
+            <button type="button" class="chip" data-eye="rounded" aria-pressed="false">Rounded</button>
+            <button type="button" class="chip" data-eye="circle" aria-pressed="false">Circle</button>
+            <button type="button" class="chip" data-eye="leaf" aria-pressed="false">Leaf</button>
+          </div>
+        </div>
+
+        <div class="group">
+          <h2>Colors</h2>
+          <div class="colors">
+            <label class="swatch"><input type="color" id="fg"><span>Foreground</span></label>
+            <label class="swatch"><input type="color" id="bg"><span>Background</span></label>
+            <label class="swatch"><input type="color" id="fg2"><span>Gradient end</span></label>
+          </div>
+          <p class="hint">Gradient end is used by the Gradient and Neon styles (and as the accent in Glass).</p>
+        </div>
+
+        <div class="group">
+          <h2>Logo</h2>
+          <div class="row">
+            <button type="button" id="logoBtn" class="btn btn-secondary">Upload logo</button>
+            <button type="button" id="removeLogoBtn" class="btn btn-quiet-dark" disabled>Remove</button>
+            <input type="file" id="logoInput" accept="image/*" hidden>
+          </div>
+          <p id="logoMsg" class="hint file-msg" role="status"></p>
+
+          <label class="field range">
+            <span class="label">Logo size <output id="logoSizeOut"></output></span>
+            <input type="range" id="logoSize" min="10" max="30" step="1">
+          </label>
+
+          <div class="two">
+            <label class="field">
+              <span class="label">Logo background</span>
+              <select id="logoShape">
+                <option value="rounded">Rounded square</option>
+                <option value="circle">Circle</option>
+                <option value="none">None</option>
+              </select>
+            </label>
+            <label class="swatch swatch-inline"><input type="color" id="logoBg"><span>Background colour</span></label>
+          </div>
+          <p class="hint">A logo automatically switches the code to the highest error correction (H).</p>
+        </div>
+
+        <div class="group">
+          <h2>Size and spacing</h2>
+          <label class="field range">
+            <span class="label">QR size <output id="sizeOut"></output></span>
+            <input type="range" id="size" min="200" max="1200" step="20">
+          </label>
+          <label class="field range">
+            <span class="label">Margin (quiet zone) <output id="marginOut"></output></span>
+            <input type="range" id="margin" min="2" max="8" step="1">
+          </label>
+        </div>
+
+        <div class="group">
+          <h2>Caption</h2>
+          <label class="check"><input type="checkbox" id="captionOn"><span>Show a text label under the code</span></label>
+          <label class="field">
+            <span class="sr-only">Caption text</span>
+            <input type="text" id="captionText" maxlength="40" placeholder="Scan me" autocomplete="off">
+          </label>
+        </div>
+
+      </div>
+    </section>
+
+    <p class="footnote">
+      Scan test uses an in-browser decoder as a quick check. Always try the final code with your own phone before you print it.
+    </p>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <script src="script.js"></script>
+</body>
+</html>
