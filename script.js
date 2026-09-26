@@ -1,749 +1,1831 @@
-/* =========================================================
-   SMART QR DESIGNER
-   Static, client-side QR designer. No backend, no API keys.
-   Libraries (loaded from a CDN, with a backup CDN):
-     - qrcode-generator  -> creates the QR matrix
-     - jsQR              -> optional "scan test" of the finished design
-   ========================================================= */
+/**
+ * Smart QR Studio — Dynamic Evidence-Based QR Platform
+ * Final Two-Issue Hardening Patch:
+ * - Structural 7x7 finder pattern safety: Canvas and SVG render exact, unclipped 7x7 structural QR Finders
+ *   (outer 7x7 box, 1-module clear separator ring, solid 3x3 core) preserving standard 1:1:3:1:1 proportions
+ *   without decorative clipping, while allowing creative dot styles on data modules.
+ * - Server theme-color validation: incoming metadata themeColor is strictly validated via isValidHexColor()
+ *   and normalized before entering the application state, canvas, SVG, or luminance calculations.
+ */
+
 (function () {
   'use strict';
 
-  /* ---------------------------------------------------------
-     1. CONFIGURATION
-     --------------------------------------------------------- */
-  var QR_SOURCES = [
-    'https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js',
-    'https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js',
-    'https://unpkg.com/qrcode-generator@1.4.4/qrcode.js'
-  ];
-  var JSQR_SOURCES = [
-    'https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js',
-    'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js',
-    'https://unpkg.com/jsqr@1.4.0/dist/jsQR.js'
-  ];
-
-  var MAX_LOGO_BYTES = 5 * 1024 * 1024; // 5 MB
-  var LOGO_MAX_PX = 320;                // logos are downscaled to this size in the browser
-
-  // Domain lists used for platform detection (plain JavaScript URL parsing, no API).
-  var PLATFORM_DOMAINS = {
-    facebook: ['facebook.com', 'fb.com', 'fb.me', 'fb.watch'],
-    instagram: ['instagram.com', 'instagr.am'],
-    youtube: ['youtube.com', 'youtu.be'],
-    tiktok: ['tiktok.com'],
-    whatsapp: ['wa.me', 'whatsapp.com'],
-    linkedin: ['linkedin.com', 'lnkd.in']
+  // --- 1. APPLICATION STATE ---
+  const state = {
+    url: '',
+    theme: localStorage.getItem('smart_qr_app_theme') || 'system',
+    detection: null,
+    smartMode: 'identity', // 'identity' | 'context'
+    designVariationIndex: 0,
+    activePreset: null,
+    activeLogoImg: null,
+    activeLogoDataUrl: null,
+    activeLogoIsVerified: false,
+    customLogoImg: null,
+    customLogoDataUrl: null,
+    isManualOverride: false,
+    currentAnalysisId: 0,
+    currentRenderToken: 0,
+    options: {
+      dotStyle: 'square', // 'square' | 'rounded' | 'dots' | 'classy' | 'smooth'
+      eyeStyle: 'square', // 'square' | 'rounded' | 'circle' | 'leaf'
+      fgColor: '#0F172A',
+      bgColor: '#FFFFFF',
+      useGradient: false,
+      fgGradColor: '#2563EB',
+      logoMode: 'auto', // 'auto' | 'none' | 'custom'
+      centerBadgeText: '',
+      frameStyle: 'none', // 'none' | 'badge-top' | 'badge-bottom' | 'pill'
+      frameText: 'SCAN ME',
+      ecc: 'H',
+      quietZone: 4,
+      size: 1024
+    }
   };
 
-  // Platform-inspired themes: colours + a sensible default style. No official artwork.
-  var THEMES = {
-    generic:   { name: 'Website',   style: 'rounded',  eye: 'rounded', fg: '#111827', fg2: '#4f46e5', mid: null,      bg: '#ffffff', caption: 'Scan me' },
-    facebook:  { name: 'Facebook',  style: 'rounded',  eye: 'rounded', fg: '#1877f2', fg2: '#0b4fb0', mid: null,      bg: '#ffffff', caption: 'Find us on Facebook' },
-    instagram: { name: 'Instagram', style: 'gradient', eye: 'rounded', fg: '#833ab4', fg2: '#f56040', mid: '#d62976', bg: '#ffffff', caption: 'Open on Instagram' },
-    youtube:   { name: 'YouTube',   style: 'classic',  eye: 'rounded', fg: '#d90000', fg2: '#7f0000', mid: null,      bg: '#ffffff', caption: 'Watch on YouTube' },
-    tiktok:    { name: 'TikTok',    style: 'neon',     eye: 'rounded', fg: '#25f4ee', fg2: '#fe2c55', mid: null,      bg: '#0b0b12', caption: 'Watch on TikTok' },
-    whatsapp:  { name: 'WhatsApp',  style: 'organic',  eye: 'leaf',    fg: '#128c7e', fg2: '#075e54', mid: null,      bg: '#ffffff', caption: 'Chat on WhatsApp' },
-    linkedin:  { name: 'LinkedIn',  style: 'glass',    eye: 'rounded', fg: '#0a66c2', fg2: '#00a0dc', mid: null,      bg: '#ffffff', caption: 'Connect on LinkedIn' }
-  };
+  // --- 2. VALIDATION, COLOR, XML, URI & URL UTILITIES ---
 
-  // Finder ("eye") shapes: outer radius, inner-hole radius, centre radius.
-  // Each keeps the required 7x7 ring + 3x3 centre structure of a QR finder pattern.
-  var EYES = {
-    square:  { o: 0,            h: 0,            i: 0 },
-    rounded: { o: 2,            h: 1,            i: 0.8 },
-    circle:  { o: 3.5,          h: 2.5,          i: 1.5 },
-    leaf:    { o: [3, 0, 3, 0], h: [2, 0, 2, 0], i: [1.5, 0, 1.5, 0] }
-  };
+  function isValidHexColor(hex) {
+    if (!hex || typeof hex !== 'string') return false;
+    return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(hex.trim());
+  }
 
-  var FONT_STACK = "-apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
+  function normalizeHexColor(hex) {
+    const clean = hex.trim();
+    if (clean.length === 4) {
+      return `#${clean[1]}${clean[1]}${clean[2]}${clean[2]}${clean[3]}${clean[3]}`.toUpperCase();
+    }
+    return clean.toUpperCase();
+  }
 
-  /* ---------------------------------------------------------
-     2. SMALL HELPERS
-     --------------------------------------------------------- */
-  function fmt(v) { return +(+v).toFixed(3); }
+  function hexToRgb(hex) {
+    const clean = normalizeHexColor(hex).replace('#', '');
+    const rgbInt = parseInt(clean, 16);
+    return {
+      r: (rgbInt >> 16) & 0xff,
+      g: (rgbInt >> 8) & 0xff,
+      b: rgbInt & 0xff
+    };
+  }
 
-  function escapeXml(s) {
-    return String(s).replace(/[&<>"']/g, function (ch) {
-      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[ch];
+  function rgbToHex(r, g, b) {
+    const clamp = (val) => Math.max(0, Math.min(255, Math.round(val)));
+    const toHex = (c) => clamp(c).toString(16).padStart(2, '0').toUpperCase();
+    return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+  }
+
+  function adjustColorBrightness(hex, factor) {
+    const { r, g, b } = hexToRgb(hex);
+    if (factor < 0) {
+      const mult = 1 + factor;
+      return rgbToHex(r * mult, g * mult, b * mult);
+    }
+    return rgbToHex(r + (255 - r) * factor, g + (255 - g) * factor, b + (255 - b) * factor);
+  }
+
+  function escapeXml(unsafe) {
+    if (!unsafe) return '';
+    return String(unsafe).replace(/[<>&'"]/g, function (c) {
+      switch (c) {
+        case '<': return '&lt;';
+        case '>': return '&gt;';
+        case '&': return '&amp;';
+        case '\'': return '&apos;';
+        case '"': return '&quot;';
+        default: return c;
+      }
     });
   }
 
-  function hexToRgb(h) {
-    h = String(h).replace('#', '');
-    if (h.length === 3) h = h.split('').map(function (c) { return c + c; }).join('');
-    var n = parseInt(h, 16);
-    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-  }
-  function rgbToHex(rgb) {
-    return '#' + rgb.map(function (v) {
-      return Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, '0');
-    }).join('');
-  }
-  function mix(a, b, t) {
-    var A = hexToRgb(a), B = hexToRgb(b);
-    return rgbToHex(A.map(function (v, i) { return v + (B[i] - v) * t; }));
-  }
-  function lum(hex) {
-    var c = hexToRgb(hex).map(function (v) {
-      v /= 255;
-      return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
-    });
-    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
-  }
-  function contrast(a, b) {
-    var l1 = lum(a), l2 = lum(b);
-    return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
-  }
-  // Nudge a colour lighter/darker until it has enough contrast with the background.
-  function ensureContrast(color, bg, min) {
-    if (contrast(color, bg) >= min) return color;
-    var target = lum(bg) < 0.5 ? '#ffffff' : '#000000';
-    for (var t = 0.05; t <= 1.0001; t += 0.05) {
-      var cand = mix(color, target, t);
-      if (contrast(cand, bg) >= min) return cand;
+  function safeDecodeURIComponent(str) {
+    if (!str) return '';
+    try {
+      return decodeURIComponent(str);
+    } catch (e) {
+      return String(str).replace(/%(?![0-9a-fA-F]{2})/g, '%25');
     }
-    return target;
-  }
-  function autoLogoBg(bg) { return lum(bg) < 0.2 ? '#ffffff' : bg; }
-
-  /* ---------------------------------------------------------
-     3. URL VALIDATION + PLATFORM DETECTION
-     --------------------------------------------------------- */
-  function parseUrl(raw) {
-    var s = String(raw || '').trim();
-    if (!s) return { error: 'Please enter a URL first.' };
-    if (/\s/.test(s)) return { error: 'Please enter a valid URL.' };
-    var candidate = /^[a-z][a-z0-9+.\-]*:\/\//i.test(s) ? s : 'https://' + s;
-    var u;
-    try { u = new URL(candidate); } catch (e) { return { error: 'Please enter a valid URL.' }; }
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') return { error: 'Please enter a valid URL.' };
-    var host = u.hostname.toLowerCase();
-    var ok = host === 'localhost' ||
-      /^\d{1,3}(\.\d{1,3}){3}$/.test(host) ||
-      host.charAt(0) === '[' ||
-      /^([a-z0-9-]+\.)+[a-z][a-z0-9-]{1,}$/.test(host);
-    if (!ok) return { error: 'Please enter a valid URL.' };
-    return { url: candidate, host: host };
   }
 
-  function detectPlatform(host) {
-    host = String(host || '').toLowerCase().replace(/\.$/, '');
-    var ids = Object.keys(PLATFORM_DOMAINS);
-    for (var i = 0; i < ids.length; i++) {
-      var list = PLATFORM_DOMAINS[ids[i]];
-      for (var j = 0; j < list.length; j++) {
-        if (host === list[j] || host.slice(-(list[j].length + 1)) === '.' + list[j]) return ids[i];
+  function normalizeURL(rawUrl) {
+    if (!rawUrl || typeof rawUrl !== 'string') return '';
+    const trimmed = rawUrl.trim();
+    try {
+      const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed);
+      const parsed = new URL(hasScheme ? trimmed : `https://${trimmed}`);
+
+      if ((parsed.protocol === 'http:' && parsed.port === '80') ||
+          (parsed.protocol === 'https:' && parsed.port === '443')) {
+        parsed.port = '';
       }
-    }
-    return 'generic';
-  }
 
-  /* ---------------------------------------------------------
-     4. SVG PATH BUILDERS (everything is drawn in "module" units)
-     --------------------------------------------------------- */
-  // Rounded rectangle with per-corner radii [tl, tr, br, bl]. Always drawn clockwise.
-  function rr(x, y, w, h, r) {
-    var t = Array.isArray(r) ? r : [r, r, r, r];
-    var m = Math.min(w, h) / 2;
-    var tl = Math.min(t[0], m), tr = Math.min(t[1], m), br = Math.min(t[2], m), bl = Math.min(t[3], m);
-    var d = 'M' + fmt(x + tl) + ' ' + fmt(y) + 'H' + fmt(x + w - tr);
-    if (tr > 0) d += 'A' + fmt(tr) + ' ' + fmt(tr) + ' 0 0 1 ' + fmt(x + w) + ' ' + fmt(y + tr);
-    d += 'V' + fmt(y + h - br);
-    if (br > 0) d += 'A' + fmt(br) + ' ' + fmt(br) + ' 0 0 1 ' + fmt(x + w - br) + ' ' + fmt(y + h);
-    d += 'H' + fmt(x + bl);
-    if (bl > 0) d += 'A' + fmt(bl) + ' ' + fmt(bl) + ' 0 0 1 ' + fmt(x) + ' ' + fmt(y + h - bl);
-    d += 'V' + fmt(y + tl);
-    if (tl > 0) d += 'A' + fmt(tl) + ' ' + fmt(tl) + ' 0 0 1 ' + fmt(x + tl) + ' ' + fmt(y);
-    return d + 'Z';
-  }
+      parsed.hostname = parsed.hostname.toLowerCase();
 
-  // Classic: square modules, merged into horizontal runs.
-  function pathSquare(g, n) {
-    var d = '';
-    for (var r = 0; r < n; r++) {
-      var c = 0;
-      while (c < n) {
-        if (g[r][c]) {
-          var s = c;
-          while (c < n && g[r][c]) c++;
-          d += 'M' + s + ' ' + r + 'h' + (c - s) + 'v1h' + (-(c - s)) + 'z';
-        } else c++;
+      if (parsed.pathname === '/') {
+        parsed.pathname = '';
       }
+
+      return parsed.href;
+    } catch (e) {
+      return trimmed;
     }
-    return d;
   }
 
-  // Separate soft squares / dots (Gradient + Neon).
-  function pathDots(g, n, inset, radius) {
-    var d = '', size = 1 - 2 * inset;
-    for (var r = 0; r < n; r++)
-      for (var c = 0; c < n; c++)
-        if (g[r][c]) d += rr(c + inset, r + inset, size, size, radius);
-    return d;
+  function isSafeScheme(rawUrl) {
+    try {
+      const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(rawUrl.trim());
+      const parsed = new URL(hasScheme ? rawUrl.trim() : `https://${rawUrl.trim()}`);
+      return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    } catch (e) {
+      return false;
+    }
   }
 
-  // Connected "liquid" modules (Rounded, Glass, Organic). Only outer corners are rounded.
-  // With fillets = true, inner (concave) corners are filled with curves as well (Organic).
-  function pathConnected(g, n, R, fillets) {
-    function at(r, c) { return r >= 0 && c >= 0 && r < n && c < n && g[r][c]; }
-    var d = '';
-    for (var r = 0; r < n; r++) {
-      for (var c = 0; c < n; c++) {
-        if (!g[r][c]) continue;
-        var u = at(r - 1, c), dn = at(r + 1, c), l = at(r, c - 1), rt = at(r, c + 1);
-        d += rr(c, r, 1, 1, [
-          (!u && !l) ? R : 0,
-          (!u && !rt) ? R : 0,
-          (!dn && !rt) ? R : 0,
-          (!dn && !l) ? R : 0
-        ]);
-        if (fillets) {
-          var f = fmt(R);
-          if (u && l && !at(r - 1, c - 1))
-            d += 'M' + c + ' ' + r + 'L' + fmt(c - R) + ' ' + r + 'A' + f + ' ' + f + ' 0 0 0 ' + c + ' ' + fmt(r - R) + 'Z';
-          if (u && rt && !at(r - 1, c + 1))
-            d += 'M' + (c + 1) + ' ' + r + 'L' + (c + 1) + ' ' + fmt(r - R) + 'A' + f + ' ' + f + ' 0 0 0 ' + fmt(c + 1 + R) + ' ' + r + 'Z';
-          if (dn && rt && !at(r + 1, c + 1))
-            d += 'M' + (c + 1) + ' ' + (r + 1) + 'L' + fmt(c + 1 + R) + ' ' + (r + 1) + 'A' + f + ' ' + f + ' 0 0 0 ' + (c + 1) + ' ' + fmt(r + 1 + R) + 'Z';
-          if (dn && l && !at(r + 1, c - 1))
-            d += 'M' + c + ' ' + (r + 1) + 'L' + c + ' ' + fmt(r + 1 + R) + 'A' + f + ' ' + f + ' 0 0 0 ' + fmt(c - R) + ' ' + (r + 1) + 'Z';
+  // --- 3. QR SPECIFICATION STRUCTURAL FUNCTION-PATTERN PROTECTION ---
+  const QRStructure = {
+    alignmentPatternCenters: [
+      [], // V0
+      [], // V1
+      [6, 18],
+      [6, 22],
+      [6, 26],
+      [6, 30],
+      [6, 34],
+      [6, 22, 38],
+      [6, 24, 42],
+      [6, 26, 46],
+      [6, 28, 50],
+      [6, 30, 54],
+      [6, 32, 58],
+      [6, 34, 62],
+      [6, 26, 46, 66],
+      [6, 26, 48, 70],
+      [6, 26, 50, 74],
+      [6, 30, 54, 78],
+      [6, 30, 56, 82],
+      [6, 30, 58, 86],
+      [6, 34, 62, 90],
+      [6, 28, 50, 72, 94],
+      [6, 26, 50, 74, 98],
+      [6, 30, 54, 78, 102],
+      [6, 28, 54, 80, 106],
+      [6, 32, 58, 84, 110],
+      [6, 30, 58, 86, 114],
+      [6, 34, 62, 90, 118],
+      [6, 26, 50, 74, 98, 122],
+      [6, 30, 54, 78, 102, 126],
+      [6, 26, 52, 78, 104, 130],
+      [6, 30, 56, 82, 108, 134],
+      [6, 34, 60, 86, 112, 138],
+      [6, 30, 58, 86, 114, 142],
+      [6, 34, 62, 90, 118, 146],
+      [6, 30, 54, 78, 102, 126, 150],
+      [6, 24, 50, 76, 102, 128, 154],
+      [6, 28, 54, 80, 106, 132, 158],
+      [6, 32, 58, 84, 110, 136, 162],
+      [6, 26, 54, 82, 110, 138, 166],
+      [6, 30, 58, 86, 114, 142, 170]
+    ],
+
+    getVersion(moduleCount) {
+      return Math.round((moduleCount - 21) / 4) + 1;
+    },
+
+    createFunctionModuleMask(moduleCount) {
+      const mask = Array.from({ length: moduleCount }, () => new Uint8Array(moduleCount));
+      const v = this.getVersion(moduleCount);
+
+      // 1. Finder patterns + separators (8x8 module regions)
+      for (let r = 0; r < 9; r++) {
+        for (let c = 0; c < 9; c++) {
+          if (r < moduleCount && c < moduleCount) mask[r][c] = 1;
+          if (r < moduleCount && (moduleCount - 1 - c) >= 0) mask[r][moduleCount - 1 - c] = 1;
+          if ((moduleCount - 1 - r) >= 0 && c < moduleCount) mask[moduleCount - 1 - r][c] = 1;
         }
       }
-    }
-    return d;
-  }
 
-  // One finder pattern (ring + centre). Use with fill-rule="evenodd".
-  function eyeShape(x, y, e) {
-    return rr(x, y, 7, 7, e.o) + rr(x + 1, y + 1, 5, 5, e.h) + rr(x + 2, y + 2, 3, 3, e.i);
-  }
-
-  function inFinder(r, c, n) {
-    return (r < 7 && c < 7) || (r < 7 && c >= n - 7) || (r >= n - 7 && c < 7);
-  }
-
-  /* ---------------------------------------------------------
-     5. QR CREATION + SVG COMPOSITION
-     --------------------------------------------------------- */
-  function makeQr(st) {
-    var ec = st.logo ? 'H' : 'Q'; // "H" (30% recovery) whenever a logo covers the centre
-    var qr = window.qrcode(0, ec);
-    qr.addData(st.url, 'Byte');
-    qr.make();
-    return { qr: qr, ec: ec, count: qr.getModuleCount() };
-  }
-
-  // Boolean grid of the DATA modules only (finder patterns and the logo zone are removed).
-  function buildGrid(st, q) {
-    var n = q.count;
-    var clearLogo = !!st.logo && st.logoShape !== 'none';
-    var half = n * st.logoSize / 100 / 2 + 0.35;
-    var mid = n / 2;
-    var g = [];
-    for (var r = 0; r < n; r++) {
-      var row = [];
-      for (var c = 0; c < n; c++) {
-        var dark = q.qr.isDark(r, c);
-        if (dark && inFinder(r, c, n)) dark = false;
-        if (dark && clearLogo) {
-          var dx = Math.abs(c + 0.5 - mid), dy = Math.abs(r + 0.5 - mid);
-          if (st.logoShape === 'circle') { if (Math.sqrt(dx * dx + dy * dy) <= half) dark = false; }
-          else if (dx <= half && dy <= half) dark = false;
+      // 2. Format Information Areas
+      for (let i = 0; i <= 8; i++) {
+        if (i < moduleCount) {
+          mask[8][i] = 1;
+          mask[i][8] = 1;
         }
-        row.push(dark);
       }
-      g.push(row);
-    }
-    return g;
-  }
-
-  function logoLayer(st, n) {
-    if (!st.logo) return '';
-    var bs = n * st.logoSize / 100, c = n / 2, out = '';
-    if (st.logoShape !== 'none') {
-      var rad = st.logoShape === 'circle' ? bs / 2 : bs * 0.22;
-      out += '<path d="' + rr(c - bs / 2, c - bs / 2, bs, bs, rad) + '" fill="' + st.logoBg + '"/>';
-    }
-    var iw = st.logoShape === 'none' ? bs : (st.logoShape === 'circle' ? bs * 0.66 : bs * 0.76);
-    out += '<image x="' + fmt(c - iw / 2) + '" y="' + fmt(c - iw / 2) + '" width="' + fmt(iw) + '" height="' + fmt(iw) +
-           '" preserveAspectRatio="xMidYMid meet" xlink:href="' + st.logo + '"/>';
-    return out;
-  }
-
-  // Returns { svg, w, h }. w/h are the pixel size used for the width/height attributes.
-  function buildSvg(st, q, opts) {
-    opts = opts || {};
-    var n = q.count, m = st.margin, N = n + 2 * m;
-    var capText = (st.caption && String(st.captionText || '').trim()) ? String(st.captionText).trim() : '';
-    var capH = capText ? Math.max(3.4, N * 0.085) : 0;
-    var W = N, H = N + capH;
-    var px = opts.px || st.size;
-    var pw = px, ph = Math.round(px * H / W);
-    var style = st.style;
-    var g = buildGrid(st, q);
-    var defs = [], bgLayer, codeLayer, capLayer = '';
-
-    // ----- fills
-    var useGrad = style === 'gradient' || style === 'neon';
-    if (useGrad) {
-      defs.push('<linearGradient id="sqGrad" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="' + n + '" y2="' + n + '">' +
-        '<stop offset="0" stop-color="' + st.fg + '"/>' +
-        (st.mid ? '<stop offset="0.5" stop-color="' + st.mid + '"/>' : '') +
-        '<stop offset="1" stop-color="' + st.fg2 + '"/></linearGradient>');
-    }
-    var dataFill = useGrad ? 'url(#sqGrad)' : st.fg;
-    var eyeFill = style === 'neon' ? st.fg2 : dataFill;
-
-    // ----- modules + finder patterns
-    var modPath;
-    if (style === 'classic') modPath = pathSquare(g, n);
-    else if (style === 'rounded') modPath = pathConnected(g, n, 0.5, false);
-    else if (style === 'organic') modPath = pathConnected(g, n, 0.5, true);
-    else if (style === 'glass') modPath = pathConnected(g, n, 0.38, false);
-    else if (style === 'gradient') modPath = pathDots(g, n, 0.05, 0.3);
-    else modPath = pathDots(g, n, 0.1, 0.4); // neon
-
-    var e = EYES[st.eye] || EYES.square;
-    var eyePath = eyeShape(0, 0, e) + eyeShape(n - 7, 0, e) + eyeShape(0, n - 7, e);
-    var shapes = '<path d="' + modPath + '" fill="' + dataFill + '"/>' +
-                 '<path d="' + eyePath + '" fill="' + eyeFill + '" fill-rule="evenodd"/>';
-
-    // ----- style-specific background + effects
-    if (style === 'neon') {
-      defs.push('<filter id="sqGlow" x="-10%" y="-10%" width="120%" height="120%" color-interpolation-filters="sRGB">' +
-        '<feGaussianBlur stdDeviation="0.38" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>');
-      bgLayer = '<rect width="' + fmt(W) + '" height="' + fmt(H) + '" fill="' + st.bg + '"/>';
-      if (m >= 3) {
-        bgLayer += '<rect x="0.9" y="0.9" width="' + fmt(W - 1.8) + '" height="' + fmt(H - 1.8) + '" rx="1.8" fill="none" stroke="' +
-                   st.fg2 + '" stroke-width="0.14" opacity="0.9" filter="url(#sqGlow)"/>';
+      for (let c = moduleCount - 8; c < moduleCount; c++) {
+        if (c >= 0) mask[8][c] = 1;
       }
-      shapes = '<g filter="url(#sqGlow)">' + shapes + '</g>';
-    } else if (style === 'glass') {
-      var c1 = mix(st.bg, st.fg, 0.16), c2 = mix(st.bg, st.fg2, 0.30);
-      defs.push('<linearGradient id="sqGlassBg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="' + c1 + '"/><stop offset="1" stop-color="' + c2 + '"/></linearGradient>');
-      defs.push('<filter id="sqBlur" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="' + fmt(N * 0.06) + '"/></filter>');
-      defs.push('<filter id="sqCard" x="-10%" y="-10%" width="120%" height="125%"><feDropShadow dx="0" dy="0.3" stdDeviation="0.55" flood-color="#000000" flood-opacity="0.18"/></filter>');
-      defs.push('<filter id="sqSoft" x="-5%" y="-5%" width="110%" height="110%"><feDropShadow dx="0" dy="0.08" stdDeviation="0.12" flood-color="#000000" flood-opacity="0.22"/></filter>');
-      var inset = Math.min(1, m * 0.3);
-      bgLayer = '<rect width="' + fmt(W) + '" height="' + fmt(H) + '" fill="url(#sqGlassBg)"/>' +
-        '<circle cx="' + fmt(W * 0.12) + '" cy="' + fmt(N * 0.1) + '" r="' + fmt(N * 0.28) + '" fill="' + st.fg2 + '" opacity="0.55" filter="url(#sqBlur)"/>' +
-        '<circle cx="' + fmt(W * 0.9) + '" cy="' + fmt(N * 0.92) + '" r="' + fmt(N * 0.3) + '" fill="' + st.fg + '" opacity="0.4" filter="url(#sqBlur)"/>' +
-        '<rect x="' + fmt(inset) + '" y="' + fmt(inset) + '" width="' + fmt(N - 2 * inset) + '" height="' + fmt(N - 2 * inset) +
-        '" rx="1.8" fill="' + mix(st.bg, '#ffffff', 0.85) + '" fill-opacity="0.92" stroke="#ffffff" stroke-opacity="0.85" stroke-width="0.12" filter="url(#sqCard)"/>';
-      shapes = '<g filter="url(#sqSoft)">' + shapes + '</g>';
-    } else {
-      bgLayer = '<rect width="' + fmt(W) + '" height="' + fmt(H) + '" fill="' + st.bg + '"/>';
+      for (let r = moduleCount - 8; r < moduleCount; r++) {
+        if (r >= 0) mask[r][8] = 1;
+      }
+
+      // 3. Timing patterns
+      for (let i = 0; i < moduleCount; i++) {
+        mask[6][i] = 1;
+        mask[i][6] = 1;
+      }
+
+      // 4. Alignment patterns
+      if (v >= 2 && v <= 40 && this.alignmentPatternCenters[v]) {
+        const centers = this.alignmentPatternCenters[v];
+        for (let i = 0; i < centers.length; i++) {
+          for (let j = 0; j < centers.length; j++) {
+            const cr = centers[i];
+            const cc = centers[j];
+            if ((cr <= 8 && cc <= 8) ||
+                (cr <= 8 && cc >= moduleCount - 9) ||
+                (cr >= moduleCount - 9 && cc <= 8)) {
+              continue;
+            }
+            for (let ar = -2; ar <= 2; ar++) {
+              for (let ac = -2; ac <= 2; ac++) {
+                const pr = cr + ar;
+                const pc = cc + ac;
+                if (pr >= 0 && pr < moduleCount && pc >= 0 && pc < moduleCount) {
+                  mask[pr][pc] = 1;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // 5. Version info areas
+      if (v >= 7) {
+        for (let r = 0; r < 6; r++) {
+          for (let c = 0; c < 3; c++) {
+            mask[r][moduleCount - 11 + c] = 1;
+            mask[moduleCount - 11 + c][r] = 1;
+          }
+        }
+      }
+
+      // 6. Dark module
+      const darkModuleRow = 4 * v + 9;
+      if (darkModuleRow < moduleCount) {
+        mask[darkModuleRow][8] = 1;
+      }
+
+      return mask;
     }
+  };
 
-    codeLayer = '<g transform="translate(' + m + ' ' + m + ')">' + shapes + logoLayer(st, n) + '</g>';
+  // --- 4. INTERNATIONAL UNICODE-AWARE IDENTITY SYNTHESIZER ---
+  const IdentitySynthesizer = {
+    generateMeaningfulAbbreviation(name, maxChars = 4) {
+      if (!name) return '';
+      const stopWords = new Set(['and', 'of', 'the', 'for', 'in', 'at', 'on', 'a', 'an', 'to', 'by', 'with', 'co', 'inc', 'corp', 'llc', 'ltd']);
 
-    // ----- optional caption under the code
-    if (capText) {
-      var fs = capH * 0.42, maxW = N * 0.86, est = capText.length * fs * 0.58;
-      if (est > maxW) fs = maxW / (capText.length * 0.58);
-      var capColor = style === 'gradient' ? st.fg2 : st.fg;
-      capLayer = '<text x="' + fmt(W / 2) + '" y="' + fmt(N + capH * 0.5 + fs * 0.35) + '" text-anchor="middle" font-family="' + FONT_STACK +
-                 '" font-weight="700" font-size="' + fmt(fs) + '" fill="' + capColor + '"' +
-                 (style === 'neon' ? ' filter="url(#sqGlow)"' : '') + '>' + escapeXml(capText) + '</text>';
-    }
-
-    var label = 'QR code for ' + st.url;
-    var svg = '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="' + pw + '" height="' + ph +
-      '" viewBox="0 0 ' + fmt(W) + ' ' + fmt(H) + '" role="img" aria-label="' + escapeXml(label) + '">' +
-      '<title>' + escapeXml(label) + '</title><defs>' + defs.join('') + '</defs>' + bgLayer + codeLayer + capLayer + '</svg>';
-    return { svg: svg, w: pw, h: ph };
-  }
-
-  // Honest "scan-safety" hints based on the current design.
-  function assess(st, q) {
-    var tips = [];
-    var effBg = st.style === 'glass' ? mix(st.bg, '#ffffff', 0.85) : st.bg;
-    var cols = [st.fg];
-    if (st.style === 'gradient' || st.style === 'neon') { cols.push(st.fg2); if (st.mid) cols.push(st.mid); }
-    var minC = Math.min.apply(null, cols.map(function (c) { return contrast(c, effBg); }));
-    var inverted = cols.some(function (c) { return lum(c) > lum(effBg); });
-    if (minC < 3) tips.push({ level: 'bad', text: 'Low contrast (' + minC.toFixed(1) + ':1). Use a darker code colour or a lighter background.' });
-    else if (minC < 4.5) tips.push({ level: 'warn', text: 'Contrast is on the low side (' + minC.toFixed(1) + ':1). Test it before printing.' });
-    if (inverted) tips.push({ level: 'warn', text: 'Light-on-dark codes scan on most modern phones, but some older scanner apps cannot read them.' });
-    if (st.logo) {
-      tips.push(st.logoSize > 26
-        ? { level: 'warn', text: 'Large logo. Keep it at 26% or less for the most reliable scanning.' }
-        : { level: 'ok', text: 'Logo added with maximum error correction (H).' });
-    }
-    if (st.margin < 3) tips.push({ level: 'warn', text: 'A quiet zone under 3 modules can make scanning harder.' });
-    if (q.count >= 57) tips.push({ level: 'warn', text: 'Long link = dense code. A shorter link scans faster.' });
-    if (!tips.length) tips.push({ level: 'ok', text: 'Good contrast and quiet zone. Error correction level ' + q.ec + '.' });
-    return tips;
-  }
-
-  /* ---------------------------------------------------------
-     6. LIBRARY LOADING
-     --------------------------------------------------------- */
-  function loadScript(src) {
-    return new Promise(function (resolve, reject) {
-      var s = document.createElement('script');
-      s.src = src; s.async = true;
-      s.onload = function () { resolve(); };
-      s.onerror = function () { s.remove(); reject(new Error('Failed: ' + src)); };
-      document.head.appendChild(s);
-    });
-  }
-  function loadLib(isReady, sources) {
-    if (isReady()) return Promise.resolve(true);
-    var chain = Promise.resolve(false);
-    sources.forEach(function (src) {
-      chain = chain.then(function (done) {
-        if (done) return true;
-        return loadScript(src).then(function () { return isReady(); }, function () { return false; });
-      });
-    });
-    return chain;
-  }
-  function qrReady() { return typeof window.qrcode === 'function'; }
-  function jsqrReady() { return typeof window.jsQR === 'function'; }
-
-  /* =========================================================
-     7. APP (browser only)
-     ========================================================= */
-  function initApp() {
-    var $ = function (id) { return document.getElementById(id); };
-
-    function freshState() {
-      return {
-        url: '', host: '', detected: 'generic', themeId: 'generic',
-        style: 'rounded', eye: 'rounded',
-        fg: '#111827', fg2: '#4f46e5', mid: null, bg: '#ffffff',
-        size: 512, margin: 4,
-        logo: null, logoName: '', logoSize: 22, logoShape: 'rounded', logoBg: '#ffffff', logoBgAuto: true,
-        caption: false, captionText: 'Scan me'
-      };
-    }
-    var state = freshState();
-    var current = null;         // latest QR matrix info
-    var libsPromise = loadLib(qrReady, QR_SOURCES);
-    var jsqrPromise = loadLib(jsqrReady, JSQR_SOURCES);
-
-    // ----- element refs
-    var urlForm = $('urlForm'), urlInput = $('urlInput'), urlError = $('urlError');
-    var studio = $('studio'), preview = $('preview'), renderError = $('renderError');
-    var scanStatus = $('scanStatus'), tipsList = $('tips');
-    var themeSelect = $('themeSelect');
-    var fgInput = $('fg'), fg2Input = $('fg2'), bgInput = $('bg');
-    var sizeInput = $('size'), marginInput = $('margin');
-    var logoInput = $('logoInput'), logoBtn = $('logoBtn'), removeLogoBtn = $('removeLogoBtn'), logoMsg = $('logoMsg');
-    var logoSizeInput = $('logoSize'), logoShapeSelect = $('logoShape'), logoBgInput = $('logoBg');
-    var captionOn = $('captionOn'), captionText = $('captionText');
-    var styleChips = Array.prototype.slice.call(document.querySelectorAll('[data-style]'));
-    var eyeChips = Array.prototype.slice.call(document.querySelectorAll('[data-eye]'));
-
-    // ----- small UI helpers
-    var toastTimer;
-    function toast(msg) {
-      var t = $('toast');
-      t.textContent = msg; t.hidden = false; t.classList.add('show');
-      clearTimeout(toastTimer);
-      toastTimer = setTimeout(function () { t.classList.remove('show'); t.hidden = true; }, 2600);
-    }
-    function showUrlError(msg) { urlError.textContent = msg; urlError.hidden = false; urlInput.setAttribute('aria-invalid', 'true'); }
-    function clearUrlError() { urlError.hidden = true; urlInput.removeAttribute('aria-invalid'); }
-
-    function applyTheme(id) {
-      var t = THEMES[id] || THEMES.generic;
-      state.themeId = THEMES[id] ? id : 'generic';
-      state.style = t.style; state.eye = t.eye;
-      state.fg = t.fg; state.fg2 = t.fg2; state.mid = t.mid; state.bg = t.bg;
-      state.caption = state.themeId !== 'generic';
-      state.captionText = t.caption;
-      if (state.logoBgAuto) state.logoBg = autoLogoBg(state.bg);
-    }
-
-    function setBrandColors() {
-      var root = document.documentElement.style;
-      var c1 = state.fg, c2 = state.fg2;
-      // keep UI accents readable: if the code colour is very light, use the second colour for UI
-      if (contrast(c1, '#ffffff') < 2.2) c1 = state.fg2;
-      if (contrast(c1, '#ffffff') < 2.2) c1 = '#4f46e5';
-      root.setProperty('--brand', c1);
-      root.setProperty('--brand-2', state.mid || c2);
-    }
-
-    function syncControls() {
-      var t = THEMES[state.detected] || THEMES.generic;
-      $('detectedName').textContent = state.detected === 'generic' ? 'Generic website' : t.name;
-      $('detectedHost').textContent = state.host;
-      themeSelect.value = state.themeId;
-      styleChips.forEach(function (b) { b.setAttribute('aria-pressed', String(b.getAttribute('data-style') === state.style)); });
-      eyeChips.forEach(function (b) { b.setAttribute('aria-pressed', String(b.getAttribute('data-eye') === state.eye)); });
-      fgInput.value = state.fg; fg2Input.value = state.fg2; bgInput.value = state.bg;
-      sizeInput.value = state.size; $('sizeOut').textContent = state.size + ' px';
-      marginInput.value = state.margin; $('marginOut').textContent = state.margin + ' modules';
-      logoSizeInput.value = state.logoSize; $('logoSizeOut').textContent = state.logoSize + '%';
-      logoShapeSelect.value = state.logoShape; logoBgInput.value = state.logoBg;
-      var has = !!state.logo;
-      removeLogoBtn.disabled = !has; logoSizeInput.disabled = !has; logoShapeSelect.disabled = !has; logoBgInput.disabled = !has;
-      logoBtn.textContent = has ? 'Replace logo' : 'Upload logo';
-      if (has && state.logoName) logoMsg.textContent = state.logoName;
-      captionOn.checked = state.caption; captionText.value = state.captionText;
-      captionText.disabled = !state.caption;
-      setBrandColors();
-    }
-
-    /* ----- rendering ----- */
-    var rafPending = false;
-    function renderSoon() {
-      if (rafPending) return;
-      rafPending = true;
-      requestAnimationFrame(function () { rafPending = false; render(); });
-    }
-
-    function render() {
-      if (!state.url) return;
-      if (!qrReady()) { showRenderError('The QR library is not loaded yet. Check your internet connection and reload the page.'); return; }
+      let tokens = [];
       try {
-        current = makeQr(state);
-        var out = buildSvg(state, current);
-        preview.innerHTML = out.svg;
-        renderError.hidden = true;
-        renderTips(assess(state, current));
-        scheduleScanCheck();
-      } catch (err) {
-        current = null;
-        var msg = /overflow|too long|code length/i.test(String(err && err.message))
-          ? 'This link is too long to fit in a QR code. Please use a shorter link.'
-          : 'Sorry, the QR code could not be generated. Please check the link and try again.';
-        showRenderError(msg);
-        if (window.console) console.error(err);
+        tokens = name
+          .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+          .split(/\s+/)
+          .filter(t => t.length > 0 && !stopWords.has(t.toLowerCase()));
+      } catch (e) {
+        tokens = name
+          .replace(/[^a-zA-Z0-9\s]/g, ' ')
+          .split(/\s+/)
+          .filter(t => t.length > 0 && !stopWords.has(t.toLowerCase()));
       }
-    }
-    function showRenderError(msg) {
-      renderError.textContent = msg; renderError.hidden = false;
-      preview.innerHTML = ''; tipsList.innerHTML = ''; setBadge('hidden');
-    }
 
-    function renderTips(tips) {
-      tipsList.innerHTML = '';
-      tips.slice(0, 4).forEach(function (t) {
-        var li = document.createElement('li');
-        li.className = 'tip tip-' + t.level;
-        li.textContent = t.text;
-        tipsList.appendChild(li);
-      });
-    }
-
-    /* ----- scan test (jsQR) ----- */
-    var scanToken = 0, scanTimer;
-    function setBadge(kind, extra) {
-      var map = {
-        checking: ['Checking scan…', 'scan-checking'],
-        ok: ['Scan test passed', 'scan-ok'],
-        fail: ['Scan test failed. Try more contrast, a bigger quiet zone or a smaller logo.', 'scan-fail'],
-        off: ['Scan test unavailable (offline). Test with your phone.', 'scan-off']
-      };
-      if (kind === 'hidden') { scanStatus.hidden = true; return; }
-      var m = map[kind];
-      scanStatus.hidden = false;
-      scanStatus.className = 'scan-status ' + m[1];
-      scanStatus.textContent = m[0];
-    }
-    function scheduleScanCheck() {
-      setBadge('checking');
-      clearTimeout(scanTimer);
-      scanTimer = setTimeout(runScanCheck, 400);
-    }
-    function runScanCheck() {
-      var token = ++scanToken;
-      var snapshot = current, url = state.url;
-      if (!snapshot) return;
-      jsqrPromise.then(function (ok) {
-        if (token !== scanToken) return;
-        if (!ok) { setBadge('off'); return; }
-        var out = buildSvg(state, snapshot, { px: 640 });
-        return svgToCanvas(out.svg, out.w, out.h).then(function (canvas) {
-          if (token !== scanToken) return;
-          var ctx = canvas.getContext('2d');
-          var img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-          var res = window.jsQR(img.data, img.width, img.height, { inversionAttempts: 'attemptBoth' });
-          setBadge(res && res.data === url ? 'ok' : 'fail');
-        });
-      }).catch(function () { if (token === scanToken) setBadge('off'); });
-    }
-
-    /* ----- export ----- */
-    function svgToCanvas(svgString, w, h) {
-      return new Promise(function (resolve, reject) {
-        var blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
-        var objUrl = URL.createObjectURL(blob);
-        var img = new Image();
-        img.onload = function () {
-          var c = document.createElement('canvas');
-          c.width = w; c.height = h;
-          var ctx = c.getContext('2d');
-          ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
-          ctx.drawImage(img, 0, 0, w, h);
-          URL.revokeObjectURL(objUrl);
-          resolve(c);
-        };
-        img.onerror = function () { URL.revokeObjectURL(objUrl); reject(new Error('Could not render the image.')); };
-        img.src = objUrl;
-      });
-    }
-    function saveBlob(blob, name) {
-      var a = document.createElement('a');
-      var href = URL.createObjectURL(blob);
-      a.href = href; a.download = name;
-      document.body.appendChild(a); a.click();
-      setTimeout(function () { a.remove(); URL.revokeObjectURL(href); }, 2000);
-    }
-    function fileName(ext) {
-      var slug = state.themeId === 'generic' ? 'website' : state.themeId;
-      return 'smart-qr-' + slug + '.' + ext;
-    }
-    function downloadPng() {
-      if (!current) { toast('Generate a QR code first.'); return; }
-      var out = buildSvg(state, current, { px: state.size });
-      svgToCanvas(out.svg, out.w, out.h).then(function (canvas) {
-        canvas.toBlob(function (blob) {
-          if (!blob) { toast('PNG export failed. Try the SVG download.'); return; }
-          saveBlob(blob, fileName('png'));
-          toast('Saved ' + fileName('png'));
-        }, 'image/png');
-      }).catch(function () { toast('PNG export failed. Try the SVG download.'); });
-    }
-    function downloadSvg() {
-      if (!current) { toast('Generate a QR code first.'); return; }
-      var out = buildSvg(state, current, { px: state.size });
-      var xml = '<?xml version="1.0" encoding="UTF-8"?>\n' + out.svg;
-      saveBlob(new Blob([xml], { type: 'image/svg+xml' }), fileName('svg'));
-      toast('Saved ' + fileName('svg'));
-    }
-
-    /* ----- logo upload (processed locally) ----- */
-    function handleLogoFile(file) {
-      if (!file) return;
-      logoMsg.classList.remove('is-error');
-      if (!/^image\//.test(file.type)) { logoError('Please choose an image file (PNG, JPG, SVG or WebP).'); return; }
-      if (file.size > MAX_LOGO_BYTES) { logoError('That image is larger than 5 MB. Please choose a smaller one.'); return; }
-      var reader = new FileReader();
-      reader.onerror = function () { logoError('The image could not be read. Please try another file.'); };
-      reader.onload = function () {
-        var img = new Image();
-        img.onerror = function () { logoError('The image could not be opened. Please try another file.'); };
-        img.onload = function () {
-          try {
-            var w = img.naturalWidth || LOGO_MAX_PX, h = img.naturalHeight || LOGO_MAX_PX;
-            var scale = Math.min(1, LOGO_MAX_PX / Math.max(w, h));
-            var cw = Math.max(1, Math.round(w * scale)), ch = Math.max(1, Math.round(h * scale));
-            var c = document.createElement('canvas');
-            c.width = cw; c.height = ch;
-            c.getContext('2d').drawImage(img, 0, 0, cw, ch);
-            state.logo = c.toDataURL('image/png');
-            state.logoName = file.name;
-            syncControls(); render();
-          } catch (e) { logoError('The image could not be processed. Please try another file.'); }
-        };
-        img.src = reader.result;
-      };
-      reader.readAsDataURL(file);
-    }
-    function logoError(msg) {
-      logoMsg.textContent = msg; logoMsg.classList.add('is-error');
-    }
-
-    /* ----- style switching keeps colours readable ----- */
-    function setStyle(s) {
-      var prev = state.style;
-      state.style = s;
-      var keys = ['fg', 'fg2', 'mid'];
-      if (s === 'neon' && prev !== 'neon') {
-        if (lum(state.bg) > 0.25) { state.bg = '#0b0b12'; if (state.logoBgAuto) state.logoBg = autoLogoBg(state.bg); }
-        keys.forEach(function (k) { if (state[k]) state[k] = ensureContrast(state[k], state.bg, 4.5); });
-      } else if (prev === 'neon' && s !== 'neon' && lum(state.bg) < 0.2) {
-        state.bg = '#ffffff'; if (state.logoBgAuto) state.logoBg = autoLogoBg(state.bg);
-        keys.forEach(function (k) { if (state[k]) state[k] = ensureContrast(state[k], state.bg, 4.5); });
+      if (tokens.length >= 2) {
+        const letters = tokens.map(t => Array.from(t)[0].toUpperCase()).slice(0, maxChars);
+        return letters.join('');
       }
-    }
 
-    /* ----- events ----- */
-    urlForm.addEventListener('submit', function (ev) {
-      ev.preventDefault();
-      var parsed = parseUrl(urlInput.value);
-      if (parsed.error) { showUrlError(parsed.error); return; }
-      clearUrlError();
-      libsPromise.then(function (ok) {
-        if (!ok) { showUrlError('The QR library could not be loaded. Check your internet connection and reload the page.'); return; }
-        var detected = detectPlatform(parsed.host);
-        var firstTime = studio.hidden;
-        state.url = parsed.url; state.host = parsed.host;
-        if (firstTime || detected !== state.detected) {
-          state.detected = detected;
-          applyTheme(detected);
+      return '';
+    },
+
+    synthesizeBadgeLabel(displayName, username, platform, maxChars = 4) {
+      if (displayName && displayName !== platform) {
+        const abbr = this.generateMeaningfulAbbreviation(displayName, maxChars);
+        if (abbr && abbr.length >= 2 && abbr.length <= maxChars) return abbr;
+      }
+
+      if (displayName && !displayName.includes(' ')) {
+        const chars = Array.from(displayName);
+        if (chars.length <= maxChars) return displayName.toUpperCase();
+      }
+
+      if (username) {
+        const cleanUser = username.replace(/^@/, '');
+        const chars = Array.from(cleanUser);
+        if (chars.length <= maxChars) return cleanUser.toUpperCase();
+
+        const userAbbr = this.generateMeaningfulAbbreviation(cleanUser.replace(/[._-]/g, ' '), maxChars);
+        if (userAbbr && userAbbr.length >= 2) return userAbbr;
+        return chars.slice(0, maxChars).join('').toUpperCase();
+      }
+
+      if (platform) {
+        const pChars = Array.from(platform);
+        if (pChars.length <= maxChars) return platform.toUpperCase();
+      }
+
+      if (displayName) {
+        const words = displayName.split(/\s+/).filter(Boolean);
+        if (words.length >= 2) {
+          return (Array.from(words[0])[0] + Array.from(words[1])[0]).toUpperCase();
         }
-        studio.hidden = false;
-        syncControls();
-        render();
-        if (firstTime) studio.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        return Array.from(displayName).slice(0, maxChars).join('').toUpperCase();
+      }
+
+      return 'QR';
+    }
+  };
+
+  // --- 5. PLUGGABLE METADATA PROVIDER ---
+  const MetadataProvider = {
+    cache: new Map(),
+    activeAbortController: null,
+    apiEndpoint: '',
+
+    sanitize(str) {
+      if (!str) return '';
+      const div = document.createElement('div');
+      div.textContent = String(str).trim();
+      return div.textContent;
+    },
+
+    extractDomainRoot(host) {
+      const parts = host.replace(/^www\./, '').split('.');
+      if (parts.length >= 2) {
+        const root = parts[parts.length - 2];
+        return root.charAt(0).toUpperCase() + root.slice(1);
+      }
+      return host;
+    },
+
+    async fetchEvidence(rawUrl, analysisId) {
+      const normalized = normalizeURL(rawUrl);
+
+      if (this.cache.has(normalized)) {
+        return { evidence: this.cache.get(normalized), isStale: false };
+      }
+
+      if (this.activeAbortController) {
+        this.activeAbortController.abort();
+      }
+      this.activeAbortController = new AbortController();
+      const signal = this.activeAbortController.signal;
+
+      if (!isSafeScheme(normalized)) {
+        const rawResult = {
+          valid: false,
+          platform: 'Raw Data',
+          displayName: this.sanitize(rawUrl.slice(0, 24)),
+          username: null,
+          category: 'Direct Text / Payload',
+          confidence: 'Basic heuristic detection',
+          brandColor: '#0F172A',
+          badgeText: 'TXT',
+          imageCandidates: [],
+          isVerifiedServerMetadata: false
+        };
+        this.cache.set(normalized, rawResult);
+        return { evidence: rawResult, isStale: analysisId !== state.currentAnalysisId };
+      }
+
+      const parsed = new URL(normalized);
+      const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+      const path = parsed.pathname;
+      const pathParts = path.split('/').filter(Boolean);
+
+      let platform = this.extractDomainRoot(host);
+      let displayName = null;
+      let username = null;
+      let category = 'Web Destination';
+      let confidence = 'Structural path detection';
+      let brandColor = '#2563EB';
+      let isVerifiedServerMetadata = false;
+      const imageCandidates = [];
+
+      const matchesDomain = (targetDomain) => host === targetDomain || host.endsWith(`.${targetDomain}`);
+
+      if (matchesDomain('wikipedia.org')) {
+        platform = 'Wikipedia';
+        brandColor = '#1F2937';
+        if (pathParts[0] === 'wiki' && pathParts[1]) {
+          displayName = safeDecodeURIComponent(pathParts[1]).replace(/_/g, ' ');
+          category = 'Reference / Editorial';
+        } else {
+          displayName = 'Wikipedia';
+          category = 'Encyclopedia';
+        }
+      } else if (matchesDomain('github.com')) {
+        platform = 'GitHub';
+        brandColor = '#181717';
+        if (pathParts.length === 1) {
+          username = `@${pathParts[0]}`;
+          category = 'Developer Profile';
+        } else if (pathParts.length >= 2) {
+          displayName = `${pathParts[0]}/${pathParts[1]}`;
+          category = 'Source Repository';
+        }
+      } else if (matchesDomain('linkedin.com')) {
+        platform = 'LinkedIn';
+        brandColor = '#0A66C2';
+        if (path.includes('/in/') && pathParts[1]) {
+          username = `@${pathParts[1]}`;
+          category = 'Professional Profile';
+        } else if (path.includes('/company/') && pathParts[1]) {
+          displayName = safeDecodeURIComponent(pathParts[1]).replace(/[-_]/g, ' ');
+          category = 'Enterprise';
+        }
+      } else if (matchesDomain('instagram.com')) {
+        platform = 'Instagram';
+        brandColor = '#E1306C';
+        if (pathParts.length >= 1 && !['p', 'reel', 'stories', 'explore'].includes(pathParts[0])) {
+          username = `@${pathParts[0]}`;
+          category = 'Creator Profile';
+        }
+      } else if (matchesDomain('youtube.com') || host === 'youtu.be') {
+        platform = 'YouTube';
+        brandColor = '#FF0000';
+        if (path.includes('/@') && pathParts[0]) {
+          username = pathParts[0];
+          category = 'Creator Channel';
+        } else if (path.includes('/watch') || host === 'youtu.be') {
+          category = 'Video Streaming';
+        }
+      } else if (matchesDomain('facebook.com')) {
+        platform = 'Facebook';
+        brandColor = '#1877F2';
+        if (pathParts.length >= 1 && !['groups', 'pages', 'watch'].includes(pathParts[0])) {
+          username = `@${pathParts[0]}`;
+          category = 'Social Profile';
+        }
+      } else if (matchesDomain('twitter.com') || host === 'x.com') {
+        platform = 'X / Twitter';
+        brandColor = '#000000';
+        if (pathParts.length >= 1 && !['explore', 'i', 'messages'].includes(pathParts[0])) {
+          username = `@${pathParts[0]}`;
+          category = 'Social Profile';
+        }
+      } else if (matchesDomain('tiktok.com')) {
+        platform = 'TikTok';
+        brandColor = '#000000';
+        if (pathParts.length >= 1 && pathParts[0].startsWith('@')) {
+          username = pathParts[0];
+          category = 'Creator Profile';
+        } else {
+          category = 'Short Video Destination';
+        }
+      } else if (matchesDomain('pinterest.com') || matchesDomain('pinterest.co.uk')) {
+        platform = 'Pinterest';
+        brandColor = '#BD081C';
+        if (pathParts.length >= 1 && !['pin', 'search', 'today', 'explore'].includes(pathParts[0])) {
+          username = `@${pathParts[0]}`;
+          category = 'Visual Board / Creator';
+        } else {
+          category = 'Visual Discovery';
+        }
+      } else if (matchesDomain('whatsapp.com') || host === 'wa.me') {
+        platform = 'WhatsApp';
+        brandColor = '#25D366';
+        category = 'Direct Messaging';
+      } else if (matchesDomain('telegram.org') || host === 't.me') {
+        platform = 'Telegram';
+        brandColor = '#24A1DE';
+        if (pathParts.length >= 1) {
+          username = `@${pathParts[0]}`;
+          category = 'Public Channel / Contact';
+        } else {
+          category = 'Direct Messaging';
+        }
+      } else if (matchesDomain('reddit.com')) {
+        platform = 'Reddit';
+        brandColor = '#FF4500';
+        if (path.includes('/r/') && pathParts[1]) {
+          displayName = `r/${pathParts[1]}`;
+          category = 'Community Subreddit';
+        }
+      } else if (matchesDomain('spotify.com')) {
+        platform = 'Spotify';
+        brandColor = '#1DB954';
+        category = 'Audio Streaming';
+      } else if (matchesDomain('discord.com') || host === 'discord.gg') {
+        platform = 'Discord';
+        brandColor = '#5865F2';
+        category = 'Community Server';
+      } else if (host.endsWith('.edu') || host.includes('.edu.')) {
+        category = 'Higher Education';
+        brandColor = '#1E3A8A';
+      }
+
+      if (category === 'Web Destination') {
+        const lowerPath = path.toLowerCase();
+        if (lowerPath.includes('menu') || lowerPath.includes('restaurant') || lowerPath.includes('dining')) {
+          category = 'Hospitality / Menu';
+          brandColor = '#9A3412';
+        } else if (lowerPath.includes('doc') || lowerPath.includes('guide') || lowerPath.includes('api')) {
+          category = 'Documentation';
+        } else if (lowerPath.includes('shop') || lowerPath.includes('product') || lowerPath.includes('store')) {
+          category = 'E-Commerce / Store';
+        } else if (lowerPath.includes('blog') || lowerPath.includes('article') || lowerPath.includes('news')) {
+          category = 'Editorial / Article';
+        }
+      }
+
+      if (this.apiEndpoint) {
+        try {
+          const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Provider timeout')), 3500)
+          );
+          const fetchPromise = fetch(`${this.apiEndpoint}${encodeURIComponent(parsed.href)}`, { signal });
+          const response = await Promise.race([fetchPromise, timeoutPromise]);
+
+          if (response.ok) {
+            const meta = await response.json();
+            if (meta.siteName) platform = this.sanitize(meta.siteName);
+            if (meta.ogTitle || meta.title) {
+              displayName = this.sanitize(meta.ogTitle || meta.title);
+            }
+            // Validate incoming server theme color strictly before assignment
+            if (meta.themeColor && isValidHexColor(meta.themeColor)) {
+              brandColor = normalizeHexColor(meta.themeColor);
+            }
+            if (meta.author && !username) displayName = this.sanitize(meta.author);
+
+            if (meta.profileImage) imageCandidates.push({ priority: 1, type: 'profile', url: meta.profileImage, isVerified: Boolean(meta.profileImageVerified) });
+            if (meta.ogImage) imageCandidates.push({ priority: 2, type: 'og', url: meta.ogImage, isVerified: Boolean(meta.ogImageVerified) });
+            if (meta.logo) imageCandidates.push({ priority: 3, type: 'logo', url: meta.logo, isVerified: Boolean(meta.logoVerified) });
+
+            isVerifiedServerMetadata = true;
+            confidence = 'Verified server metadata';
+          }
+        } catch (err) {
+          // Fallback to structural heuristics
+        }
+      }
+
+      imageCandidates.push({
+        priority: 4,
+        type: 'favicon',
+        url: `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=128`,
+        isVerified: false
       });
-    });
-    urlInput.addEventListener('input', clearUrlError);
 
-    themeSelect.addEventListener('change', function () { applyTheme(themeSelect.value); syncControls(); render(); });
-    styleChips.forEach(function (b) {
-      b.addEventListener('click', function () { setStyle(b.getAttribute('data-style')); syncControls(); render(); });
-    });
-    eyeChips.forEach(function (b) {
-      b.addEventListener('click', function () { state.eye = b.getAttribute('data-eye'); syncControls(); render(); });
-    });
+      const effectiveDisplayName = displayName || (username ? username : platform);
+      const badgeText = IdentitySynthesizer.synthesizeBadgeLabel(displayName, username, platform, 4);
 
-    fgInput.addEventListener('input', function () { state.fg = fgInput.value; state.mid = null; setBrandColors(); renderSoon(); });
-    fg2Input.addEventListener('input', function () { state.fg2 = fg2Input.value; state.mid = null; setBrandColors(); renderSoon(); });
-    bgInput.addEventListener('input', function () {
-      state.bg = bgInput.value;
-      if (state.logoBgAuto) { state.logoBg = autoLogoBg(state.bg); logoBgInput.value = state.logoBg; }
-      renderSoon();
-    });
+      // Guarantee brandColor is always a normalized valid hex color
+      const safeBrandColor = isValidHexColor(brandColor) ? normalizeHexColor(brandColor) : '#2563EB';
 
-    sizeInput.addEventListener('input', function () { state.size = +sizeInput.value; $('sizeOut').textContent = state.size + ' px'; });
-    marginInput.addEventListener('input', function () { state.margin = +marginInput.value; $('marginOut').textContent = state.margin + ' modules'; renderSoon(); });
+      const result = {
+        valid: true,
+        url: parsed.href,
+        domain: host,
+        platform,
+        displayName: this.sanitize(effectiveDisplayName),
+        username: username ? this.sanitize(username) : null,
+        category,
+        confidence,
+        brandColor: safeBrandColor,
+        badgeText,
+        imageCandidates,
+        isVerifiedServerMetadata
+      };
 
-    logoBtn.addEventListener('click', function () { logoInput.click(); });
-    logoInput.addEventListener('change', function () { handleLogoFile(logoInput.files && logoInput.files[0]); logoInput.value = ''; });
-    removeLogoBtn.addEventListener('click', function () {
-      state.logo = null; state.logoName = ''; logoMsg.textContent = ''; logoMsg.classList.remove('is-error');
-      syncControls(); render();
-    });
-    logoSizeInput.addEventListener('input', function () { state.logoSize = +logoSizeInput.value; $('logoSizeOut').textContent = state.logoSize + '%'; renderSoon(); });
-    logoShapeSelect.addEventListener('change', function () { state.logoShape = logoShapeSelect.value; render(); });
-    logoBgInput.addEventListener('input', function () { state.logoBg = logoBgInput.value; state.logoBgAuto = false; renderSoon(); });
+      this.cache.set(normalized, result);
+      return { evidence: result, isStale: analysisId !== state.currentAnalysisId };
+    }
+  };
 
-    captionOn.addEventListener('change', function () { state.caption = captionOn.checked; captionText.disabled = !state.caption; render(); });
-    captionText.addEventListener('input', function () { state.captionText = captionText.value.slice(0, 40); renderSoon(); });
+  // --- 6. PRESETS DEFINITION ---
+  const PRESETS = [
+    { id: 'minimal', name: 'Minimal', dot: 'square', eye: 'square', fg: '#0F172A', bg: '#FFFFFF', grad: false, ecc: 'M', frame: 'none', frameText: 'SCAN ME' },
+    { id: 'professional', name: 'Professional', dot: 'rounded', eye: 'square', fg: '#1E3A8A', bg: '#F8FAFC', grad: false, ecc: 'H', frame: 'badge-bottom', frameText: 'LEARN MORE' },
+    { id: 'business', name: 'Corporate', dot: 'square', eye: 'square', fg: '#047857', bg: '#F0FDF4', grad: false, ecc: 'H', frame: 'badge-bottom', frameText: 'VISIT' },
+    { id: 'social', name: 'Social Pop', dot: 'rounded', eye: 'square', fg: '#E11D48', bg: '#FFF1F2', grad: true, gradColor: '#FB7185', ecc: 'H', frame: 'pill', frameText: 'FOLLOW' },
+    { id: 'creator', name: 'Creator', dot: 'dots', eye: 'square', fg: '#7C3AED', bg: '#FAF5FF', grad: true, gradColor: '#EC4899', ecc: 'H', frame: 'pill', frameText: 'CONNECT' },
+    { id: 'editorial', name: 'Editorial', dot: 'classy', eye: 'square', fg: '#334155', bg: '#FDFBF7', grad: false, ecc: 'H', frame: 'none', frameText: 'READ' },
+    { id: 'restaurant', name: 'Dining Menu', dot: 'smooth', eye: 'square', fg: '#9A3412', bg: '#FFFBEB', grad: false, ecc: 'H', frame: 'badge-bottom', frameText: 'VIEW MENU' },
+    { id: 'tech', name: 'Cyber Tech', dot: 'dots', eye: 'square', fg: '#0284C7', bg: '#0B132B', grad: false, ecc: 'H', frame: 'none', frameText: 'EXPLORE' },
+    { id: 'organic', name: 'Eco Organic', dot: 'smooth', eye: 'square', fg: '#15803D', bg: '#F0FDF4', grad: false, ecc: 'H', frame: 'pill', frameText: 'DISCOVER' },
+    { id: 'neon', name: 'Neon Glow', dot: 'dots', eye: 'square', fg: '#06B6D4', bg: '#030712', grad: true, gradColor: '#3B82F6', ecc: 'H', frame: 'none', frameText: 'SCAN' },
+    { id: 'luxury', name: 'Luxury Gold', dot: 'classy', eye: 'square', fg: '#854D0E', bg: '#FEFCE8', grad: false, ecc: 'H', frame: 'pill', frameText: 'EXCLUSIVE' },
+    { id: 'playful', name: 'Playful', dot: 'dots', eye: 'square', fg: '#EA580C', bg: '#FFF7ED', grad: true, gradColor: '#EAB308', ecc: 'H', frame: 'badge-bottom', frameText: 'OPEN' }
+  ];
 
-    $('downloadPng').addEventListener('click', downloadPng);
-    $('downloadSvg').addEventListener('click', downloadSvg);
-    $('resetBtn').addEventListener('click', function () {
-      var keep = { url: state.url, host: state.host, detected: state.detected };
-      state = freshState();
-      state.url = keep.url; state.host = keep.host; state.detected = keep.detected;
-      applyTheme(state.detected);
-      logoMsg.textContent = ''; logoMsg.classList.remove('is-error');
-      syncControls(); render();
-      toast('Reset to the detected theme');
-    });
+  // --- 7. TELEMETRY, CONSERVATIVE FOOTPRINT & HARDWARE SCAN TEST ---
+  const TelemetryEngine = {
+    getLuminance(hex) {
+      const clean = hex.replace('#', '');
+      const full = clean.length === 3 ? clean.split('').map(c => c + c).join('') : clean;
+      const rgb = parseInt(full, 16);
+      const r = (rgb >> 16) & 0xff;
+      const g = (rgb >> 8) & 0xff;
+      const b = (rgb >> 0) & 0xff;
+      const a = [r, g, b].map(v => {
+        v /= 255;
+        return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+      });
+      return a[0] * 0.2126 + a[1] * 0.7152 + a[2] * 0.0722;
+    },
 
-    setBrandColors();
-    libsPromise.then(function (ok) {
-      if (!ok) showUrlError('The QR library could not be loaded. Check your internet connection and reload the page.');
+    getContrast(hex1, hex2) {
+      const l1 = this.getLuminance(hex1);
+      const l2 = this.getLuminance(hex2);
+      return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+    },
+
+    getEffectiveContrast() {
+      let contrast = this.getContrast(state.options.fgColor, state.options.bgColor);
+      if (state.options.useGradient && state.options.fgGradColor) {
+        const gradContrast = this.getContrast(state.options.fgGradColor, state.options.bgColor);
+        contrast = Math.min(contrast, gradContrast);
+      }
+      return contrast;
+    },
+
+    repairColorContrast(color, bgColor, targetContrast = 4.0) {
+      if (this.getContrast(color, bgColor) >= targetContrast) {
+        return color;
+      }
+
+      const bgLum = this.getLuminance(bgColor);
+      const shouldDarken = bgLum > 0.4;
+      const steps = [0.15, 0.30, 0.45, 0.60, 0.75, 0.88];
+
+      for (const step of steps) {
+        const factor = shouldDarken ? -step : step;
+        const candidate = adjustColorBrightness(color, factor);
+        if (this.getContrast(candidate, bgColor) >= targetContrast) {
+          return candidate;
+        }
+      }
+
+      return shouldDarken ? '#0F172A' : '#FFFFFF';
+    },
+
+    computeCenterFootprint(moduleCount, isExportMode = false) {
+      if (state.options.logoMode === 'none') {
+        return { sideCells: 0, coverageRatio: 0 };
+      }
+
+      const hasSafeCustom = state.options.logoMode === 'custom' &&
+        (isExportMode ? (Boolean(state.customLogoDataUrl) || Boolean(state.customLogoImg)) : Boolean(state.customLogoImg));
+
+      const hasSafeAuto = state.options.logoMode === 'auto' &&
+        (isExportMode
+          ? (Boolean(state.activeLogoDataUrl) || Boolean(state.options.centerBadgeText))
+          : (Boolean(state.activeLogoImg) || Boolean(state.options.centerBadgeText)));
+
+      const hasEntity = hasSafeCustom || hasSafeAuto;
+
+      if (!hasEntity) {
+        return { sideCells: 0, coverageRatio: 0 };
+      }
+
+      const functionMask = QRStructure.createFunctionModuleMask(moduleCount);
+      const conservativeEccLimits = { L: 0.04, M: 0.08, Q: 0.12, H: 0.16 };
+      const maxAreaAllowed = (moduleCount * moduleCount) * (conservativeEccLimits[state.options.ecc] || 0.08);
+
+      const mid = Math.floor(moduleCount / 2);
+      let bestSide = 0;
+
+      for (let s = 3; s <= moduleCount; s += 2) {
+        if (s * s > maxAreaAllowed) break;
+
+        const half = Math.floor(s / 2);
+        let overlapsFunctionModule = false;
+
+        for (let r = mid - half; r <= mid + half; r++) {
+          for (let c = mid - half; c <= mid + half; c++) {
+            if (r < 0 || r >= moduleCount || c < 0 || c >= moduleCount || functionMask[r][c] === 1) {
+              overlapsFunctionModule = true;
+              break;
+            }
+          }
+          if (overlapsFunctionModule) break;
+        }
+
+        if (!overlapsFunctionModule) {
+          bestSide = s;
+        } else {
+          break;
+        }
+      }
+
+      const actualArea = bestSide * bestSide;
+      return {
+        sideCells: bestSide,
+        coverageRatio: (actualArea / (moduleCount * moduleCount)) * 100
+      };
+    },
+
+    async testScanDecoding(canvas, renderToken) {
+      const statusText = document.getElementById('scanStatusText');
+      if (typeof window.BarcodeDetector !== 'undefined') {
+        try {
+          const detector = new window.BarcodeDetector({ formats: ['qr_code'] });
+          const barcodes = await detector.detect(canvas);
+          if (renderToken === state.currentRenderToken) {
+            if (barcodes && barcodes.length > 0) {
+              statusText.textContent = 'Hardware Scan Decoded ✓';
+              return;
+            }
+          }
+        } catch (e) {
+          // Fall through
+        }
+      }
+      if (renderToken === state.currentRenderToken) {
+        statusText.textContent = 'Scan Safety Calculated';
+      }
+    },
+
+    evaluateAndRepair(moduleCount = 33, isExportMode = false) {
+      if (!state.url) {
+        document.getElementById('contrastVal').textContent = '—';
+        document.getElementById('logoAreaVal').textContent = '—';
+        document.getElementById('eccVal').textContent = '—';
+        document.getElementById('scanStatusText').textContent = 'Awaiting Input';
+        document.getElementById('repairAlert').classList.add('hidden-field');
+        return { sideCells: 0, coverageRatio: 0 };
+      }
+
+      let repaired = false;
+
+      // 1. Multi-stage smart brand color repair for foreground & gradient
+      const initialFgContrast = this.getContrast(state.options.fgColor, state.options.bgColor);
+      if (initialFgContrast < 4.0) {
+        const repairedFg = this.repairColorContrast(state.options.fgColor, state.options.bgColor, 4.0);
+        state.options.fgColor = repairedFg;
+
+        const fgInput = document.getElementById('fgColor');
+        const fgTextInput = document.getElementById('fgColorText');
+        if (fgInput) fgInput.value = repairedFg;
+        if (fgTextInput) fgTextInput.value = repairedFg;
+        repaired = true;
+      }
+
+      if (state.options.useGradient && state.options.fgGradColor) {
+        const initialGradContrast = this.getContrast(state.options.fgGradColor, state.options.bgColor);
+        if (initialGradContrast < 4.0) {
+          const repairedGrad = this.repairColorContrast(state.options.fgGradColor, state.options.bgColor, 4.0);
+          state.options.fgGradColor = repairedGrad;
+
+          const gradInput = document.getElementById('fgGradColor');
+          const gradTextInput = document.getElementById('fgGradColorText');
+          if (gradInput) gradInput.value = repairedGrad;
+          if (gradTextInput) gradTextInput.value = repairedGrad;
+          repaired = true;
+        }
+      }
+
+      // 2. Elevate to ECC H when center cutout exists and ECC is lower
+      const hasCenterEntity = (state.options.logoMode === 'custom' && state.customLogoImg) ||
+                              (state.options.logoMode === 'auto' && (state.activeLogoImg || state.options.centerBadgeText));
+
+      if (hasCenterEntity && (state.options.ecc === 'L' || state.options.ecc === 'M')) {
+        state.options.ecc = 'H';
+        const eccSelect = document.getElementById('eccSelect');
+        if (eccSelect) eccSelect.value = 'H';
+        repaired = true;
+      }
+
+      // 3. Final post-repair recomputations
+      const finalFootprint = this.computeCenterFootprint(moduleCount, isExportMode);
+      const finalEffectiveContrast = this.getEffectiveContrast();
+
+      document.getElementById('contrastVal').textContent = `${finalEffectiveContrast.toFixed(1)}:1`;
+      document.getElementById('logoAreaVal').textContent = finalFootprint.coverageRatio > 0 ? `${finalFootprint.coverageRatio.toFixed(1)}%` : '0%';
+      document.getElementById('eccVal').textContent = state.options.ecc;
+
+      const repairAlert = document.getElementById('repairAlert');
+      if (repaired) {
+        repairAlert.classList.remove('hidden-field');
+        document.getElementById('scanStatusText').textContent = 'Auto-Repaired for Scanning';
+      } else {
+        repairAlert.classList.add('hidden-field');
+      }
+
+      return finalFootprint;
+    }
+  };
+
+  // --- 8. DYNAMIC MULTI-SIGNAL SYNTHETIC DESIGN ENGINES ---
+  function composeIdentityDesign(detection, variationIndex = 0) {
+    const brand = detection.brandColor || '#0F172A';
+    const hasImage = Boolean(state.activeLogoImg);
+    const badge = detection.badgeText || 'QR';
+    const tag = detection.username || detection.displayName;
+
+    const variations = [
+      { dot: 'rounded', eye: 'square', useGrad: false, gradColor: brand },
+      { dot: 'square', eye: 'square', useGrad: false, gradColor: brand },
+      { dot: 'classy', eye: 'square', useGrad: true, gradColor: '#3B82F6' }
+    ];
+
+    const pick = variations[variationIndex % variations.length];
+
+    let explanation = `Identity Mode: Dynamically composed for "${detection.displayName}".`;
+    if (hasImage) {
+      const assetDescriptor = state.activeLogoIsVerified ? 'verified server asset' : 'resolved identity asset';
+      explanation += ` Center integrated with ${assetDescriptor} and brand geometry.`;
+    } else {
+      explanation += ` Center integrated with generated badge [${badge}] and safe contrast.`;
+    }
+
+    return {
+      dotStyle: pick.dot,
+      eyeStyle: 'square', // Strictly preserved structural finder
+      fgColor: brand,
+      bgColor: '#FFFFFF',
+      useGradient: pick.useGrad,
+      fgGradColor: pick.gradColor,
+      centerBadgeText: hasImage ? '' : badge,
+      ecc: 'H',
+      quietZone: 4,
+      frameStyle: 'pill',
+      frameText: tag.toUpperCase().slice(0, 16),
+      explanation
+    };
+  }
+
+  function composeContextDesign(detection, variationIndex = 0) {
+    const url = (detection.url || '').toLowerCase();
+    const platform = (detection.platform || '').toLowerCase();
+    const cat = (detection.category || '').toLowerCase();
+    const name = (detection.displayName || '').toLowerCase();
+    const username = (detection.username || '').toLowerCase();
+
+    const isSocialCreator = platform === 'instagram' || platform === 'tiktok' || platform === 'pinterest' ||
+      cat.includes('creator') || cat.includes('profile') || username.startsWith('@');
+
+    const isVideoDestination = platform === 'youtube' || url.includes('/watch') || url.includes('youtu.be') ||
+      cat.includes('video') || cat.includes('streaming');
+
+    const isEditorialReference = platform === 'wikipedia' || cat.includes('editorial') || cat.includes('reference') ||
+      cat.includes('article') || url.includes('/wiki/') || url.includes('/blog/');
+
+    const isDiningHospitality = cat.includes('hospitality') || cat.includes('menu') || url.includes('menu') ||
+      url.includes('restaurant') || url.includes('dining') || name.includes('cafe') || name.includes('bistro');
+
+    const isEducational = platform.includes('college') || platform.includes('university') || cat.includes('education') ||
+      url.includes('.edu') || name.includes('college') || name.includes('school');
+
+    const isMessaging = platform === 'whatsapp' || platform === 'telegram' || platform === 'discord' ||
+      cat.includes('messaging') || url.includes('wa.me') || url.includes('t.me');
+
+    let dotStyle = 'square';
+    let eyeStyle = 'square'; // Strictly preserved structural finder
+    let fgColor = detection.brandColor || '#0F172A';
+    let bgColor = '#FFFFFF';
+    let useGradient = false;
+    let fgGradColor = '#2563EB';
+    let frameStyle = 'none';
+    let frameText = 'SCAN ME';
+    let explanation = '';
+
+    if (isSocialCreator) {
+      dotStyle = 'dots';
+      fgColor = detection.brandColor && detection.brandColor !== '#0F172A' ? detection.brandColor : '#BE185D';
+      useGradient = true;
+      fgGradColor = '#7C3AED';
+      frameStyle = 'pill';
+      frameText = username ? username.toUpperCase().slice(0, 16) : 'CONNECT';
+      explanation = `Context Mode (Social/Creator): Recognized creator profile for "${detection.displayName}". Fluid curved modules and connection framing applied.`;
+    } else if (isVideoDestination) {
+      dotStyle = variationIndex % 2 === 0 ? 'rounded' : 'square';
+      fgColor = '#DC2626';
+      useGradient = true;
+      fgGradColor = '#991B1B';
+      frameStyle = 'badge-bottom';
+      frameText = 'WATCH NOW';
+      explanation = `Context Mode (Streaming/Video): Video destination identified. Media streaming palette and action banner configured.`;
+    } else if (isEditorialReference) {
+      dotStyle = variationIndex % 2 === 0 ? 'classy' : 'square';
+      fgColor = '#334155';
+      bgColor = '#FDFBF7';
+      frameStyle = 'none';
+      explanation = `Context Mode (Editorial/Reference): Structured document/article destination. Classical geometry and high readability contrast applied.`;
+    } else if (isDiningHospitality) {
+      dotStyle = 'smooth';
+      fgColor = '#9A3412';
+      bgColor = '#FFFBEB';
+      frameStyle = 'badge-bottom';
+      frameText = 'VIEW MENU';
+      explanation = `Context Mode (Hospitality): Dining/menu destination detected. Warm culinary tones and tabletop scanning geometry selected.`;
+    } else if (isEducational) {
+      dotStyle = 'rounded';
+      fgColor = '#002855';
+      frameStyle = 'badge-bottom';
+      frameText = 'LEARN MORE';
+      explanation = `Context Mode (Education): Academic/institutional signals detected. Balanced geometry and maximum error correction chosen.`;
+    } else if (isMessaging) {
+      dotStyle = 'rounded';
+      fgColor = '#0F766E';
+      frameStyle = 'pill';
+      frameText = 'CHAT NOW';
+      explanation = `Context Mode (Messaging): Direct communication destination identified. Compact conversation framing and high contrast applied.`;
+    } else {
+      dotStyle = 'square';
+      fgColor = '#0F172A';
+      bgColor = '#FFFFFF';
+      frameStyle = 'none';
+      explanation = `Context Mode (Intelligent Minimal): Universal web destination. Unobstructed standard geometry composed for reliable general scanning.`;
+    }
+
+    return {
+      dotStyle,
+      eyeStyle,
+      fgColor,
+      bgColor,
+      useGradient,
+      fgGradColor,
+      centerBadgeText: '',
+      ecc: 'H',
+      quietZone: 4,
+      frameStyle,
+      frameText,
+      explanation
+    };
+  }
+
+  // --- 9. SHARED GEOMETRY ENGINE ---
+  const GeometryEngine = {
+    computeLayout(baseSize, moduleCount, quietZone, frameStyle) {
+      const qrTotalModules = moduleCount + quietZone * 2;
+      const cellSize = baseSize / qrTotalModules;
+      const qrPixelSize = baseSize;
+
+      let topOffset = 0;
+      let totalWidth = qrPixelSize;
+      let totalHeight = qrPixelSize;
+      let frameHeight = 0;
+
+      if (frameStyle === 'badge-top') {
+        frameHeight = Math.round(baseSize * 0.12);
+        topOffset = frameHeight;
+        totalHeight = qrPixelSize + frameHeight;
+      } else if (frameStyle === 'badge-bottom' || frameStyle === 'pill') {
+        frameHeight = Math.round(baseSize * 0.12);
+        totalHeight = qrPixelSize + frameHeight;
+      }
+
+      return {
+        baseSize,
+        moduleCount,
+        quietZone,
+        cellSize,
+        qrPixelSize,
+        topOffset,
+        totalWidth,
+        totalHeight,
+        frameHeight
+      };
+    }
+  };
+
+  // --- 10. UNIFIED CANVAS & SVG RENDERER ---
+  const QRRenderer = {
+    getQRMatrix() {
+      if (!state.url || typeof qrcode === 'undefined') return null;
+      try {
+        const qr = qrcode(0, state.options.ecc || 'M');
+        qr.addData(state.url);
+        qr.make();
+        return qr;
+      } catch (err) {
+        return null;
+      }
+    },
+
+    isFinderEyeRegion(r, c, count) {
+      return (
+        (r < 7 && c < 7) ||
+        (r < 7 && c >= count - 7) ||
+        (r >= count - 7 && c < 7)
+      );
+    },
+
+    isCenterReserved(r, c, count, sideCells) {
+      if (!sideCells || sideCells <= 0) return false;
+      const half = Math.floor(sideCells / 2);
+      const mid = Math.floor(count / 2);
+      return (r >= mid - half && r <= mid + half && c >= mid - half && c <= mid + half);
+    },
+
+    renderCanvas(canvas, requestedSize = 480, isExport = false) {
+      const ctx = canvas.getContext('2d');
+      const baseSize = requestedSize;
+
+      if (!state.url) {
+        canvas.width = baseSize;
+        canvas.height = baseSize;
+        ctx.fillStyle = state.theme === 'dark' ? '#111827' : '#F8FAFC';
+        ctx.fillRect(0, 0, baseSize, baseSize);
+        ctx.fillStyle = '#64748B';
+        ctx.font = '14px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('Paste a URL to generate Smart QR', baseSize / 2, baseSize / 2);
+        return;
+      }
+
+      const qr = this.getQRMatrix();
+      if (!qr) {
+        canvas.width = baseSize;
+        canvas.height = baseSize;
+        ctx.fillStyle = state.theme === 'dark' ? '#111827' : '#F8FAFC';
+        ctx.fillRect(0, 0, baseSize, baseSize);
+        ctx.fillStyle = '#DC2626';
+        ctx.font = 'bold 13px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('Content payload too large or invalid for QR generation', baseSize / 2, baseSize / 2);
+        return;
+      }
+
+      const moduleCount = qr.getModuleCount();
+      const footprint = TelemetryEngine.evaluateAndRepair(moduleCount, isExport);
+      const functionMask = QRStructure.createFunctionModuleMask(moduleCount);
+      const geo = GeometryEngine.computeLayout(baseSize, moduleCount, state.options.quietZone, state.options.frameStyle);
+
+      canvas.width = geo.totalWidth;
+      canvas.height = geo.totalHeight;
+      ctx.clearRect(0, 0, geo.totalWidth, geo.totalHeight);
+
+      // 1. Draw Overall Background
+      ctx.fillStyle = state.options.bgColor;
+      ctx.fillRect(0, 0, geo.totalWidth, geo.totalHeight);
+
+      // 2. Setup Foreground / Gradient Fill
+      let fill = state.options.fgColor;
+      if (state.options.useGradient) {
+        const grad = ctx.createLinearGradient(0, geo.topOffset, geo.baseSize, geo.topOffset + geo.baseSize);
+        grad.addColorStop(0, state.options.fgColor);
+        grad.addColorStop(1, state.options.fgGradColor || state.options.fgColor);
+        fill = grad;
+      }
+      ctx.fillStyle = fill;
+
+      // 3. Render Data Modules & Structural Function Modules
+      for (let r = 0; r < moduleCount; r++) {
+        for (let c = 0; c < moduleCount; c++) {
+          if (this.isFinderEyeRegion(r, c, moduleCount)) continue;
+          if (this.isCenterReserved(r, c, moduleCount, footprint.sideCells)) continue;
+
+          if (qr.isDark(r, c)) {
+            const x = (c + geo.quietZone) * geo.cellSize;
+            const y = geo.topOffset + (r + geo.quietZone) * geo.cellSize;
+
+            if (functionMask[r][c] === 1) {
+              ctx.fillRect(x, y, geo.cellSize, geo.cellSize);
+            } else {
+              if (state.options.dotStyle === 'dots') {
+                ctx.beginPath();
+                ctx.arc(x + geo.cellSize / 2, y + geo.cellSize / 2, geo.cellSize * 0.42, 0, Math.PI * 2);
+                ctx.fill();
+              } else if (state.options.dotStyle === 'rounded') {
+                this.roundRect(ctx, x, y, geo.cellSize * 0.92, geo.cellSize * 0.92, geo.cellSize * 0.28);
+                ctx.fill();
+              } else if (state.options.dotStyle === 'classy') {
+                ctx.beginPath();
+                ctx.moveTo(x + geo.cellSize / 2, y);
+                ctx.lineTo(x + geo.cellSize, y + geo.cellSize / 2);
+                ctx.lineTo(x + geo.cellSize / 2, y + geo.cellSize);
+                ctx.lineTo(x, y + geo.cellSize / 2);
+                ctx.closePath();
+                ctx.fill();
+              } else if (state.options.dotStyle === 'smooth') {
+                this.roundRect(ctx, x + geo.cellSize * 0.05, y + geo.cellSize * 0.05, geo.cellSize * 0.9, geo.cellSize * 0.9, geo.cellSize * 0.45);
+                ctx.fill();
+              } else {
+                ctx.fillRect(x, y, geo.cellSize, geo.cellSize);
+              }
+            }
+          }
+        }
+      }
+
+      // 4. Render Strictly Preserved Structural 7x7 Finder Eyes
+      const eyeDim = geo.cellSize * 7;
+      this.drawCanvasEye(ctx, geo.quietZone * geo.cellSize, geo.topOffset + geo.quietZone * geo.cellSize, eyeDim, geo.cellSize, fill);
+      this.drawCanvasEye(ctx, (geo.quietZone + moduleCount - 7) * geo.cellSize, geo.topOffset + geo.quietZone * geo.cellSize, eyeDim, geo.cellSize, fill);
+      this.drawCanvasEye(ctx, geo.quietZone * geo.cellSize, geo.topOffset + (geo.quietZone + moduleCount - 7) * geo.cellSize, eyeDim, geo.cellSize, fill);
+
+      // 5. Render Central Cutout
+      if (footprint.sideCells > 0) {
+        this.drawCanvasCenter(ctx, geo, footprint.sideCells, isExport);
+      }
+
+      // 6. Render Frame Completely Outside QR Area
+      this.drawCanvasFrame(ctx, geo);
+
+      // 7. Tokenized Hardware Scan Telemetry Test (Preview only)
+      if (!isExport) {
+        const renderToken = ++state.currentRenderToken;
+        TelemetryEngine.testScanDecoding(canvas, renderToken);
+      }
+    },
+
+    /**
+     * Renders an exact, unclipped 7x7 structural QR Finder pattern:
+     * - Outer 7x7 module box
+     * - Clear 1-module separator ring (5x5 module area)
+     * - Solid 3x3 module central core
+     * Strict 1:1:3:1:1 module proportions are preserved exactly without clipping corners.
+     */
+    drawCanvasEye(ctx, x, y, size, cellSize, fill) {
+      const outerSize = size;
+      const innerClearOffset = cellSize;
+      const innerClearSize = cellSize * 5;
+      const coreOffset = cellSize * 2;
+      const coreSize = cellSize * 3;
+
+      // Layer 1: Solid 7x7 module outer square
+      ctx.fillStyle = fill;
+      ctx.fillRect(x, y, outerSize, outerSize);
+
+      // Layer 2: 5x5 module clear separator ring
+      ctx.fillStyle = state.options.bgColor;
+      ctx.fillRect(x + innerClearOffset, y + innerClearOffset, innerClearSize, innerClearSize);
+
+      // Layer 3: Solid 3x3 module central square core
+      ctx.fillStyle = fill;
+      ctx.fillRect(x + coreOffset, y + coreOffset, coreSize, coreSize);
+    },
+
+    drawCanvasCenter(ctx, geo, sideCells, isExport = false) {
+      const pixelSize = sideCells * geo.cellSize;
+      const x = (geo.baseSize - pixelSize) / 2;
+      const y = geo.topOffset + (geo.baseSize - pixelSize) / 2;
+
+      let img = null;
+      let isCORSUnsafeForExport = false;
+
+      if (state.options.logoMode === 'custom') {
+        if (isExport) {
+          if (state.customLogoDataUrl && state.customLogoImg) {
+            img = state.customLogoImg;
+          } else {
+            isCORSUnsafeForExport = true;
+          }
+        } else {
+          img = state.customLogoImg;
+        }
+      } else if (state.options.logoMode === 'auto') {
+        if (isExport) {
+          if (state.activeLogoDataUrl && state.activeLogoImg) {
+            img = state.activeLogoImg;
+          } else {
+            isCORSUnsafeForExport = true;
+          }
+        } else {
+          img = state.activeLogoImg;
+        }
+      }
+
+      ctx.fillStyle = state.options.bgColor;
+      this.roundRect(ctx, x - 2, y - 2, pixelSize + 4, pixelSize + 4, 6);
+      ctx.fill();
+
+      if (img && !isCORSUnsafeForExport) {
+        ctx.save();
+        this.roundRect(ctx, x, y, pixelSize, pixelSize, 6);
+        ctx.clip();
+
+        const nw = img.naturalWidth || img.width || 1;
+        const nh = img.naturalHeight || img.height || 1;
+        const scale = Math.min(pixelSize / nw, pixelSize / nh);
+        const dw = nw * scale;
+        const dh = nh * scale;
+        const dx = x + (pixelSize - dw) / 2;
+        const dy = y + (pixelSize - dh) / 2;
+
+        ctx.drawImage(img, dx, dy, dw, dh);
+        ctx.restore();
+      } else if (state.options.centerBadgeText || (isExport && isCORSUnsafeForExport)) {
+        const badgeLabel = state.options.centerBadgeText || (state.detection ? state.detection.badgeText : 'QR');
+        ctx.fillStyle = state.options.fgColor;
+        this.roundRect(ctx, x, y, pixelSize, pixelSize, 6);
+        ctx.fill();
+        ctx.fillStyle = state.options.bgColor;
+        ctx.font = `bold ${Math.round(pixelSize * 0.36)}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(badgeLabel, x + pixelSize / 2, y + pixelSize / 2);
+      }
+    },
+
+    drawCanvasFrame(ctx, geo) {
+      if (state.options.frameStyle === 'none') return;
+      const text = state.options.frameText || 'SCAN ME';
+
+      ctx.fillStyle = state.options.fgColor;
+      ctx.font = `bold ${Math.round(geo.baseSize * 0.04)}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+
+      if (state.options.frameStyle === 'badge-top') {
+        ctx.fillRect(0, 0, geo.totalWidth, geo.frameHeight);
+        ctx.fillStyle = state.options.bgColor;
+        ctx.fillText(text, geo.totalWidth / 2, geo.frameHeight / 2);
+      } else if (state.options.frameStyle === 'badge-bottom') {
+        const y = geo.baseSize;
+        ctx.fillRect(0, y, geo.totalWidth, geo.frameHeight);
+        ctx.fillStyle = state.options.bgColor;
+        ctx.fillText(text, geo.totalWidth / 2, y + geo.frameHeight / 2);
+      } else if (state.options.frameStyle === 'pill') {
+        const pillWidth = geo.baseSize * 0.65;
+        const pillHeight = geo.frameHeight * 0.75;
+        const x = (geo.totalWidth - pillWidth) / 2;
+        const y = geo.baseSize + (geo.frameHeight - pillHeight) / 2;
+        this.roundRect(ctx, x, y, pillWidth, pillHeight, pillHeight / 2);
+        ctx.fill();
+        ctx.fillStyle = state.options.bgColor;
+        ctx.fillText(text, geo.totalWidth / 2, y + pillHeight / 2);
+      }
+    },
+
+    roundRect(ctx, x, y, w, h, r) {
+      if (typeof r === 'number') r = [r, r, r, r];
+      ctx.beginPath();
+      ctx.moveTo(x + r[0], y);
+      ctx.lineTo(x + w - r[1], y);
+      ctx.quadraticCurveTo(x + w, y, x + w, y + r[1]);
+      ctx.lineTo(x + w, y + h - r[2]);
+      ctx.quadraticCurveTo(x + w, y + h, x + w - r[2], y + h);
+      ctx.lineTo(x + r[3], y + h);
+      ctx.quadraticCurveTo(x, y + h, x, y + h - r[3]);
+      ctx.lineTo(x, y + r[0]);
+      ctx.quadraticCurveTo(x, y, x + r[0], y);
+      ctx.closePath();
+    },
+
+    generateSVG() {
+      const qr = this.getQRMatrix();
+      if (!qr) return '';
+
+      const moduleCount = qr.getModuleCount();
+      const footprint = TelemetryEngine.evaluateAndRepair(moduleCount, true);
+      const functionMask = QRStructure.createFunctionModuleMask(moduleCount);
+      const baseSize = 512;
+      const geo = GeometryEngine.computeLayout(baseSize, moduleCount, state.options.quietZone, state.options.frameStyle);
+
+      let defs = '';
+      let fillAttr = `fill="${state.options.fgColor}"`;
+
+      if (state.options.useGradient) {
+        defs += `<defs>
+          <linearGradient id="qrGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="${state.options.fgColor}" />
+            <stop offset="100%" stop-color="${state.options.fgGradColor || state.options.fgColor}" />
+          </linearGradient>
+        </defs>`;
+        fillAttr = 'fill="url(#qrGrad)"';
+      }
+
+      // 1. Data Modules & Structural Function Modules (SVG)
+      let modulesSVG = '';
+      for (let r = 0; r < moduleCount; r++) {
+        for (let c = 0; c < moduleCount; c++) {
+          if (this.isFinderEyeRegion(r, c, moduleCount)) continue;
+          if (this.isCenterReserved(r, c, moduleCount, footprint.sideCells)) continue;
+
+          if (qr.isDark(r, c)) {
+            const x = (c + geo.quietZone) * geo.cellSize;
+            const y = geo.topOffset + (r + geo.quietZone) * geo.cellSize;
+
+            if (functionMask[r][c] === 1) {
+              modulesSVG += `<rect x="${x}" y="${y}" width="${geo.cellSize}" height="${geo.cellSize}" ${fillAttr} />`;
+            } else {
+              if (state.options.dotStyle === 'dots') {
+                modulesSVG += `<circle cx="${x + geo.cellSize / 2}" cy="${y + geo.cellSize / 2}" r="${geo.cellSize * 0.42}" ${fillAttr} />`;
+              } else if (state.options.dotStyle === 'rounded') {
+                modulesSVG += `<rect x="${x}" y="${y}" width="${geo.cellSize * 0.92}" height="${geo.cellSize * 0.92}" rx="${geo.cellSize * 0.28}" ${fillAttr} />`;
+              } else if (state.options.dotStyle === 'classy') {
+                const mx = x + geo.cellSize / 2;
+                const my = y + geo.cellSize / 2;
+                modulesSVG += `<polygon points="${mx},${y} ${x + geo.cellSize},${my} ${mx},${y + geo.cellSize} ${x},${my}" ${fillAttr} />`;
+              } else if (state.options.dotStyle === 'smooth') {
+                modulesSVG += `<rect x="${x + geo.cellSize * 0.05}" y="${y + geo.cellSize * 0.05}" width="${geo.cellSize * 0.9}" height="${geo.cellSize * 0.9}" rx="${geo.cellSize * 0.45}" ${fillAttr} />`;
+              } else {
+                modulesSVG += `<rect x="${x}" y="${y}" width="${geo.cellSize}" height="${geo.cellSize}" ${fillAttr} />`;
+              }
+            }
+          }
+        }
+      }
+
+      // 2. Finder Eyes Subroutine (Strict 7x7 structural modules in SVG matching Canvas)
+      const renderSVGEye = (x, y, eyeSize, cellSize) => {
+        const outerSize = eyeSize;
+        const innerClearOffset = cellSize;
+        const innerClearSize = cellSize * 5;
+        const coreOffset = cellSize * 2;
+        const coreSize = cellSize * 3;
+
+        return `
+          <rect x="${x}" y="${y}" width="${outerSize}" height="${outerSize}" ${fillAttr} />
+          <rect x="${x + innerClearOffset}" y="${y + innerClearOffset}" width="${innerClearSize}" height="${innerClearSize}" fill="${state.options.bgColor}" />
+          <rect x="${x + coreOffset}" y="${y + coreOffset}" width="${coreSize}" height="${coreSize}" ${fillAttr} />
+        `;
+      };
+
+      const eyeDim = geo.cellSize * 7;
+      const eyesSVG =
+        renderSVGEye(geo.quietZone * geo.cellSize, geo.topOffset + geo.quietZone * geo.cellSize, eyeDim, geo.cellSize) +
+        renderSVGEye((geo.quietZone + moduleCount - 7) * geo.cellSize, geo.topOffset + geo.quietZone * geo.cellSize, eyeDim, geo.cellSize) +
+        renderSVGEye(geo.quietZone * geo.cellSize, geo.topOffset + (geo.quietZone + moduleCount - 7) * geo.cellSize, eyeDim, geo.cellSize);
+
+      // 3. Center Entity Subroutine (SVG)
+      let centerSVG = '';
+      if (footprint.sideCells > 0) {
+        const pSize = footprint.sideCells * geo.cellSize;
+        const x = (geo.baseSize - pSize) / 2;
+        const y = geo.topOffset + (geo.baseSize - pSize) / 2;
+        const imgDataUrl = state.options.logoMode === 'custom' ? state.customLogoDataUrl : state.activeLogoDataUrl;
+        const badgeLabel = state.options.centerBadgeText || (state.detection ? state.detection.badgeText : 'QR');
+
+        centerSVG += `<rect x="${x - 2}" y="${y - 2}" width="${pSize + 4}" height="${pSize + 4}" rx="4" fill="${state.options.bgColor}" />`;
+
+        if (imgDataUrl && (state.options.logoMode === 'custom' || state.options.logoMode === 'auto')) {
+          centerSVG += `
+            <clipPath id="logoClip"><rect x="${x}" y="${y}" width="${pSize}" height="${pSize}" rx="4" /></clipPath>
+            <image href="${imgDataUrl}" x="${x}" y="${y}" width="${pSize}" height="${pSize}" preserveAspectRatio="xMidYMid meet" clip-path="url(#logoClip)" />
+          `;
+        } else {
+          centerSVG += `
+            <rect x="${x}" y="${y}" width="${pSize}" height="${pSize}" rx="4" ${fillAttr} />
+            <text x="${x + pSize / 2}" y="${y + pSize / 2}" fill="${state.options.bgColor}" font-size="${pSize * 0.36}" font-weight="bold" font-family="sans-serif" text-anchor="middle" dominant-baseline="central">${escapeXml(badgeLabel)}</text>
+          `;
+        }
+      }
+
+      // 4. Frame Area (SVG)
+      let frameSVG = '';
+      if (state.options.frameStyle !== 'none') {
+        const text = escapeXml(state.options.frameText || 'SCAN ME');
+        const fontSize = Math.round(geo.baseSize * 0.04);
+        if (state.options.frameStyle === 'badge-top') {
+          frameSVG = `
+            <rect x="0" y="0" width="${geo.totalWidth}" height="${geo.frameHeight}" ${fillAttr} />
+            <text x="${geo.totalWidth / 2}" y="${geo.frameHeight / 2}" fill="${state.options.bgColor}" font-size="${fontSize}" font-weight="bold" font-family="sans-serif" text-anchor="middle" dominant-baseline="central">${text}</text>
+          `;
+        } else if (state.options.frameStyle === 'badge-bottom') {
+          const y = geo.baseSize;
+          frameSVG = `
+            <rect x="0" y="${y}" width="${geo.totalWidth}" height="${geo.frameHeight}" ${fillAttr} />
+            <text x="${geo.totalWidth / 2}" y="${y + geo.frameHeight / 2}" fill="${state.options.bgColor}" font-size="${fontSize}" font-weight="bold" font-family="sans-serif" text-anchor="middle" dominant-baseline="central">${text}</text>
+          `;
+        } else if (state.options.frameStyle === 'pill') {
+          const pillWidth = geo.baseSize * 0.65;
+          const pillHeight = geo.frameHeight * 0.75;
+          const x = (geo.totalWidth - pillWidth) / 2;
+          const y = geo.baseSize + (geo.frameHeight - pillHeight) / 2;
+          frameSVG = `
+            <rect x="${x}" y="${y}" width="${pillWidth}" height="${pillHeight}" rx="${pillHeight / 2}" ${fillAttr} />
+            <text x="${geo.totalWidth / 2}" y="${y + pillHeight / 2}" fill="${state.options.bgColor}" font-size="${fontSize * 0.9}" font-weight="bold" font-family="sans-serif" text-anchor="middle" dominant-baseline="central">${text}</text>
+          `;
+        }
+      }
+
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${geo.totalWidth} ${geo.totalHeight}">
+        ${defs}
+        <rect width="${geo.totalWidth}" height="${geo.totalHeight}" fill="${state.options.bgColor}" />
+        ${modulesSVG}
+        ${eyesSVG}
+        ${centerSVG}
+        ${frameSVG}
+      </svg>`;
+    }
+  };
+
+  // --- 11. ABORTABLE AUTO-IMAGE CASCADE RESOLUTION (3.5s TIMEOUT) ---
+  async function resolveAutoImageCascade(candidates, analysisId) {
+    if (!candidates || candidates.length === 0) return { img: null, dataUrl: null, isVerified: false };
+
+    const sorted = [...candidates].sort((a, b) => a.priority - b.priority);
+
+    for (const item of sorted) {
+      if (!item.url) continue;
+      if (analysisId !== state.currentAnalysisId) {
+        return { img: null, dataUrl: null, isVerified: false };
+      }
+
+      try {
+        const result = await new Promise((resolve, reject) => {
+          let isTimedOut = false;
+          const timeoutId = setTimeout(() => {
+            isTimedOut = true;
+            img.src = '';
+            reject(new Error('Candidate timeout: 3.5s exceeded'));
+          }, 3500);
+
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
+
+          img.onload = () => {
+            if (isTimedOut) return;
+            clearTimeout(timeoutId);
+            if (analysisId !== state.currentAnalysisId) {
+              reject(new Error('Stale analysis request'));
+              return;
+            }
+            try {
+              const canvas = document.createElement('canvas');
+              canvas.width = img.naturalWidth || 64;
+              canvas.height = img.naturalHeight || 64;
+              const ctx = canvas.getContext('2d');
+              ctx.drawImage(img, 0, 0);
+              const dataUrl = canvas.toDataURL('image/png');
+              resolve({ img, dataUrl, isVerified: Boolean(item.isVerified) });
+            } catch (err) {
+              resolve({ img, dataUrl: null, isVerified: Boolean(item.isVerified) });
+            }
+          };
+
+          img.onerror = () => {
+            if (isTimedOut) return;
+            clearTimeout(timeoutId);
+            reject(new Error('Network or CORS load failure'));
+          };
+
+          img.src = item.url;
+        });
+
+        if (analysisId === state.currentAnalysisId) {
+          return result;
+        }
+      } catch (e) {
+        // Continue to next candidate
+      }
+    }
+
+    return { img: null, dataUrl: null, isVerified: false };
+  }
+
+  // --- 12. UI COORDINATION & EVENT SYNC ---
+  function syncControlsFromState() {
+    document.getElementById('dotStyleSelect').value = state.options.dotStyle;
+    document.getElementById('eyeStyleSelect').value = state.options.eyeStyle;
+    document.getElementById('fgColor').value = state.options.fgColor;
+    document.getElementById('fgColorText').value = state.options.fgColor;
+    document.getElementById('bgColor').value = state.options.bgColor;
+    document.getElementById('bgColorText').value = state.options.bgColor;
+    document.getElementById('enableGradient').checked = state.options.useGradient;
+    document.getElementById('fgGradColor').value = state.options.fgGradColor || '#2563EB';
+    document.getElementById('fgGradColorText').value = state.options.fgGradColor || '#2563EB';
+    document.getElementById('frameStyleSelect').value = state.options.frameStyle;
+    document.getElementById('frameText').value = state.options.frameText;
+    document.getElementById('eccSelect').value = state.options.ecc;
+    document.getElementById('quietZoneSelect').value = String(state.options.quietZone);
+
+    updateSmartModeUI();
+    updateQuietZoneWarning();
+    renderPresets();
+  }
+
+  function updateSmartModeUI() {
+    const identityBtn = document.getElementById('modeIdentityBtn');
+    const contextBtn = document.getElementById('modeContextBtn');
+    if (identityBtn && contextBtn) {
+      identityBtn.classList.toggle('active', state.smartMode === 'identity');
+      contextBtn.classList.toggle('active', state.smartMode === 'context');
+    }
+  }
+
+  function updateQuietZoneWarning() {
+    let warning = document.getElementById('quietZoneWarning');
+    if (state.options.quietZone < 4) {
+      if (!warning) {
+        warning = document.createElement('small');
+        warning.id = 'quietZoneWarning';
+        warning.style.color = '#CA8A04';
+        warning.style.display = 'block';
+        warning.style.marginTop = '4px';
+        warning.textContent = 'Reduced quiet zone (< 4 modules) may reduce scanning reliability.';
+        document.getElementById('quietZoneSelect').parentElement.appendChild(warning);
+      }
+      warning.style.display = 'block';
+    } else if (warning) {
+      warning.style.display = 'none';
+    }
+  }
+
+  function render() {
+    const canvas = document.getElementById('qrCanvas');
+    QRRenderer.renderCanvas(canvas, 480, false);
+  }
+
+  function updateDetectionUI(det) {
+    if (!det) {
+      document.getElementById('confidenceBadge').textContent = 'Awaiting Input';
+      document.getElementById('detectedPlatformText').textContent = '—';
+      document.getElementById('detectedTitle').textContent = 'Paste a URL to analyze';
+      document.getElementById('detectedCategory').textContent = 'Destination will appear here';
+      document.getElementById('detectedDomain').textContent = '';
+      document.getElementById('detectedAvatar').textContent = '—';
+      document.getElementById('smartExplanation').textContent = 'Smart QR dynamically synthesizes destination evidence.';
+      return;
+    }
+
+    document.getElementById('confidenceBadge').textContent = det.confidence;
+    document.getElementById('detectedPlatformText').textContent = det.platform;
+    document.getElementById('detectedTitle').textContent = det.displayName;
+    document.getElementById('detectedCategory').textContent = det.category;
+    document.getElementById('detectedDomain').textContent = det.domain || '';
+
+    const avatar = document.getElementById('detectedAvatar');
+    if (state.activeLogoImg) {
+      avatar.innerHTML = '';
+      const clone = state.activeLogoImg.cloneNode();
+      clone.style.width = '100%';
+      clone.style.height = '100%';
+      clone.style.objectFit = 'contain';
+      avatar.appendChild(clone);
+    } else {
+      avatar.textContent = det.badgeText || 'QR';
+    }
+  }
+
+  async function handleAnalyze() {
+    const rawUrl = document.getElementById('urlInput').value.trim();
+    if (!rawUrl) return;
+
+    const analysisId = ++state.currentAnalysisId;
+    state.url = rawUrl;
+    state.isManualOverride = false;
+    state.activePreset = null;
+
+    const { evidence: det, isStale } = await MetadataProvider.fetchEvidence(rawUrl, analysisId);
+    if (isStale || analysisId !== state.currentAnalysisId) return;
+
+    state.detection = det;
+
+    const { img, dataUrl, isVerified } = await resolveAutoImageCascade(det.imageCandidates, analysisId);
+    if (analysisId !== state.currentAnalysisId) return;
+
+    state.activeLogoImg = img;
+    state.activeLogoDataUrl = dataUrl;
+    state.activeLogoIsVerified = isVerified;
+
+    updateDetectionUI(det);
+    applySmartDesign();
+  }
+
+  function applySmartDesign() {
+    if (!state.detection) return;
+    state.isManualOverride = false;
+    state.activePreset = null;
+
+    const chosen = state.smartMode === 'identity'
+      ? composeIdentityDesign(state.detection, state.designVariationIndex)
+      : composeContextDesign(state.detection, state.designVariationIndex);
+
+    state.options.dotStyle = chosen.dotStyle;
+    state.options.eyeStyle = chosen.eyeStyle;
+    state.options.fgColor = chosen.fgColor;
+    state.options.bgColor = chosen.bgColor;
+    state.options.useGradient = chosen.useGradient;
+    state.options.fgGradColor = chosen.fgGradColor;
+    state.options.centerBadgeText = chosen.centerBadgeText || '';
+    state.options.frameStyle = chosen.frameStyle;
+    state.options.frameText = chosen.frameText;
+    state.options.ecc = chosen.ecc;
+    state.options.quietZone = chosen.quietZone || 4;
+
+    document.getElementById('smartExplanation').textContent = chosen.explanation;
+    syncControlsFromState();
+    render();
+  }
+
+  function applyPreset(preset) {
+    state.activePreset = preset.id;
+    state.isManualOverride = true;
+    state.options.dotStyle = preset.dot;
+    state.options.eyeStyle = preset.eye;
+    state.options.fgColor = preset.fg;
+    state.options.bgColor = preset.bg;
+    state.options.useGradient = Boolean(preset.grad);
+    state.options.fgGradColor = preset.gradColor || preset.fg;
+    state.options.ecc = preset.ecc || 'H';
+    state.options.frameStyle = preset.frame || 'none';
+    state.options.frameText = preset.frameText || 'SCAN ME';
+    state.options.centerBadgeText = '';
+
+    syncControlsFromState();
+    render();
+  }
+
+  function renderPresets() {
+    const grid = document.getElementById('presetsGrid');
+    if (!grid) return;
+    grid.innerHTML = '';
+    PRESETS.forEach(p => {
+      const chip = document.createElement('div');
+      chip.className = `preset-chip ${state.activePreset === p.id ? 'active' : ''}`;
+      chip.innerHTML = `
+        <span class="preset-badge-icon" style="background: ${p.fg}; border: 2px solid ${p.bg}"></span>
+        <span>${escapeXml(p.name)}</span>
+      `;
+      chip.onclick = () => applyPreset(p);
+      grid.appendChild(chip);
     });
   }
 
-  /* ---------------------------------------------------------
-     8. BOOT (browser) / EXPORTS (for tests)
-     --------------------------------------------------------- */
-  if (typeof document !== 'undefined') {
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initApp);
-    else initApp();
+  function init() {
+    document.getElementById('urlInput').value = '';
+    updateDetectionUI(null);
+
+    document.documentElement.setAttribute('data-theme', state.theme);
+    document.querySelectorAll('.theme-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.themeVal === state.theme);
+      btn.onclick = () => {
+        state.theme = btn.dataset.themeVal;
+        localStorage.setItem('smart_qr_app_theme', state.theme);
+        document.documentElement.setAttribute('data-theme', state.theme);
+        document.querySelectorAll('.theme-btn').forEach(b => b.classList.toggle('active', b === btn));
+      };
+    });
+
+    renderPresets();
+
+    document.getElementById('analyzeBtn').onclick = handleAnalyze;
+    document.getElementById('applySmartBtn').onclick = () => {
+      state.designVariationIndex = 0;
+      applySmartDesign();
+    };
+    document.getElementById('shuffleSmartBtn').onclick = () => {
+      state.designVariationIndex++;
+      applySmartDesign();
+    };
+
+    // Smart Mode toggle bindings (Identity vs Context)
+    const identityBtn = document.getElementById('modeIdentityBtn');
+    const contextBtn = document.getElementById('modeContextBtn');
+    if (identityBtn && contextBtn) {
+      identityBtn.onclick = () => {
+        if (state.smartMode !== 'identity') {
+          state.smartMode = 'identity';
+          state.designVariationIndex = 0;
+          updateSmartModeUI();
+          applySmartDesign();
+        }
+      };
+      contextBtn.onclick = () => {
+        if (state.smartMode !== 'context') {
+          state.smartMode = 'context';
+          state.designVariationIndex = 0;
+          updateSmartModeUI();
+          applySmartDesign();
+        }
+      };
+    }
+
+    const handleManualChange = () => {
+      state.isManualOverride = true;
+      state.activePreset = null;
+      renderPresets();
+    };
+
+    document.getElementById('dotStyleSelect').onchange = e => { handleManualChange(); state.options.dotStyle = e.target.value; render(); };
+    document.getElementById('eyeStyleSelect').onchange = e => { handleManualChange(); state.options.eyeStyle = e.target.value; render(); };
+
+    // Validated color controls
+    document.getElementById('fgColor').oninput = e => {
+      if (isValidHexColor(e.target.value)) {
+        handleManualChange();
+        state.options.fgColor = normalizeHexColor(e.target.value);
+        document.getElementById('fgColorText').value = state.options.fgColor;
+        render();
+      }
+    };
+    document.getElementById('fgColorText').onchange = e => {
+      if (isValidHexColor(e.target.value)) {
+        handleManualChange();
+        state.options.fgColor = normalizeHexColor(e.target.value);
+        document.getElementById('fgColor').value = state.options.fgColor;
+        document.getElementById('fgColorText').value = state.options.fgColor;
+        render();
+      } else {
+        document.getElementById('fgColorText').value = state.options.fgColor;
+      }
+    };
+
+    document.getElementById('bgColor').oninput = e => {
+      if (isValidHexColor(e.target.value)) {
+        handleManualChange();
+        state.options.bgColor = normalizeHexColor(e.target.value);
+        document.getElementById('bgColorText').value = state.options.bgColor;
+        render();
+      }
+    };
+    document.getElementById('bgColorText').onchange = e => {
+      if (isValidHexColor(e.target.value)) {
+        handleManualChange();
+        state.options.bgColor = normalizeHexColor(e.target.value);
+        document.getElementById('bgColor').value = state.options.bgColor;
+        document.getElementById('bgColorText').value = state.options.bgColor;
+        render();
+      } else {
+        document.getElementById('bgColorText').value = state.options.bgColor;
+      }
+    };
+
+    document.getElementById('enableGradient').onchange = e => {
+      handleManualChange();
+      state.options.useGradient = e.target.checked;
+      render();
+    };
+
+    document.getElementById('fgGradColor').oninput = e => {
+      if (isValidHexColor(e.target.value)) {
+        handleManualChange();
+        state.options.fgGradColor = normalizeHexColor(e.target.value);
+        document.getElementById('fgGradColorText').value = state.options.fgGradColor;
+        render();
+      }
+    };
+    document.getElementById('fgGradColorText').onchange = e => {
+      if (isValidHexColor(e.target.value)) {
+        handleManualChange();
+        state.options.fgGradColor = normalizeHexColor(e.target.value);
+        document.getElementById('fgGradColor').value = state.options.fgGradColor;
+        document.getElementById('fgGradColorText').value = state.options.fgGradColor;
+        render();
+      } else {
+        document.getElementById('fgGradColorText').value = state.options.fgGradColor;
+      }
+    };
+
+    document.getElementById('frameStyleSelect').onchange = e => { handleManualChange(); state.options.frameStyle = e.target.value; render(); };
+    document.getElementById('frameText').oninput = e => { handleManualChange(); state.options.frameText = e.target.value; render(); };
+    document.getElementById('eccSelect').onchange = e => { handleManualChange(); state.options.ecc = e.target.value; render(); };
+
+    document.getElementById('quietZoneSelect').onchange = e => {
+      handleManualChange();
+      state.options.quietZone = parseInt(e.target.value, 10);
+      updateQuietZoneWarning();
+      render();
+    };
+
+    document.querySelectorAll('input[name="logoMode"]').forEach(radio => {
+      radio.onchange = e => {
+        handleManualChange();
+        state.options.logoMode = e.target.value;
+        const uploadCont = document.getElementById('customUploadContainer');
+        if (uploadCont) uploadCont.classList.toggle('hidden-field', e.target.value !== 'custom');
+        render();
+      };
+    });
+
+    const logoUpload = document.getElementById('logoUpload');
+    if (logoUpload) {
+      logoUpload.onchange = e => {
+        handleManualChange();
+        const file = e.target.files[0];
+        if (file) {
+          const reader = new FileReader();
+          reader.onload = ev => {
+            const img = new Image();
+            img.onload = () => {
+              state.customLogoImg = img;
+              state.customLogoDataUrl = ev.target.result;
+              render();
+            };
+            img.src = ev.target.result;
+          };
+          reader.readAsDataURL(file);
+        }
+      };
+    }
+
+    document.getElementById('downloadPngBtn').onclick = () => {
+      if (!state.url) return;
+      const exportCanvas = document.createElement('canvas');
+      QRRenderer.renderCanvas(exportCanvas, 1600, true);
+      try {
+        const dataUrl = exportCanvas.toDataURL('image/png');
+        const link = document.createElement('a');
+        link.download = `smart-qr-${Date.now()}.png`;
+        link.href = dataUrl;
+        link.click();
+      } catch (err) {
+        console.error('PNG Export Error:', err);
+      }
+    };
+
+    document.getElementById('downloadSvgBtn').onclick = () => {
+      if (!state.url) return;
+      const svg = QRRenderer.generateSVG();
+      if (!svg) return;
+      const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.download = `smart-qr-${Date.now()}.svg`;
+      link.href = objectUrl;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    };
+
+    render();
   }
-  if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { parseUrl: parseUrl, detectPlatform: detectPlatform, buildSvg: buildSvg, assess: assess, THEMES: THEMES, EYES: EYES };
-  }
+
+  window.addEventListener('DOMContentLoaded', init);
 })();
